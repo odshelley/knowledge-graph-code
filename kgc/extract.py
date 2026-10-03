@@ -36,8 +36,19 @@ class ExtractResult:
 
 
 def code_only_detect(root: Path) -> dict:
-    """detect() with every non-code category emptied."""
-    result = detect(root)
+    """detect() with every non-code category emptied.
+
+    cache_root=root lets detect() reuse graphify's on-disk cache under
+    <repo>/graphify-out/ across runs instead of re-sniffing file content
+    every time (mirrors the cache_root already passed to extract() below).
+    extra_excludes=["*.pdf"] stops detect() from attempting PDF text
+    extraction on files we're about to discard anyway - without it, a repo
+    with PDFs under a missing 'pypdf' install prints a stray WARNING line
+    for work whose result is thrown away one line later. The category-
+    zeroing below remains the actual correctness mechanism; this exclude is
+    only a noise/waste fix.
+    """
+    result = detect(root, cache_root=root, extra_excludes=["*.pdf"])
     files = result.setdefault("files", {})
     for category in NON_CODE_CATEGORIES:
         files[category] = []

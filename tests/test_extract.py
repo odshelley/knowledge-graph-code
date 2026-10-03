@@ -64,3 +64,15 @@ def test_extract_repo_missing_path_raises(tmp_path):
     repo = Repo(path=tmp_path / "absent", tag="x", enabled=True)
     with pytest.raises(FileNotFoundError):
         extract_repo(repo)
+
+
+def test_code_only_detect_excludes_pdfs_without_warning(tmp_path, capsys):
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.4 not really")
+
+    result = code_only_detect(tmp_path)
+
+    assert result["files"]["paper"] == []
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.out
+    assert "WARNING" not in captured.err

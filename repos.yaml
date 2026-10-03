@@ -1,0 +1,23 @@
+# The only file that decides what is in scope.
+# tag is permanent: it namespaces node IDs as "{tag}::{id}" and is the key the
+# Neo4j reaper scopes deletes on. Renaming a tag orphans that repo's nodes.
+repos:
+  - path: ~/Projects/knowledge-retrieval
+    tag: knowledge-retrieval
+    enabled: true
+
+  - path: ~/Projects/graphify
+    tag: graphify
+    enabled: true
+
+  - path: ~/Projects/neural_particle_method
+    tag: neural-particle-method
+    enabled: true
+
+  - path: ~/Projects/diffusion-bridge
+    tag: diffusion-bridge
+    enabled: true
+
+  - path: ~/Projects/claude
+    tag: claude
+    enabled: true

@@ -6,3 +6,11 @@
 # graphify outputs (regenerable; can be large)
 graphify-out/
 **/graphify-out/
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+
+# Generated MCP config contains the Neo4j password.
+.mcp.json

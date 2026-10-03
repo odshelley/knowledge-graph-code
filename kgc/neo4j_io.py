@@ -5,6 +5,8 @@ driver exceptions routinely include the connection string.
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 
 from neo4j import GraphDatabase
@@ -96,3 +98,192 @@ def doctor(settings: Settings, driver=None) -> DoctorReport:
     finally:
         if own_driver and driver is not None:
             driver.close()
+
+
+# --- scoped reap and batched push (Task 5) ---
+
+# AuraDB Free: Neo4j support docs say 200k nodes / 400k relationships; the
+# pricing page says 50k / 175k. Use the lower pair so we fail early rather
+# than half-pushing.
+AURA_FREE_NODE_LIMIT = 50_000
+AURA_FREE_REL_LIMIT = 175_000
+
+# The only destructive queries in the project. Both are deliberately narrow.
+# REAP_REPO is scoped on the 'repo' property that graphify's
+# prefix_graph_for_global sets on every repo-local node and on no external
+# node, so a tag matching nothing deletes nothing.
+REAP_REPO = """
+MATCH (n) WHERE n.repo = $tag
+DETACH DELETE n
+"""
+
+# External stubs (stdlib / third-party) are shared across repos and carry no
+# 'repo' property, so REAP_REPO never touches them. They orphan when the last
+# repo referencing them goes away; this sweeps those and only those.
+REAP_ORPHAN_EXTERNALS = """
+MATCH (n) WHERE n.external = true AND NOT (n)--()
+DELETE n
+"""
+
+UPSERT_NODES = """
+UNWIND $rows AS row
+MERGE (n:CodeNode {id: row.id})
+SET n += row.props
+"""
+
+# One statement per relationship type, so Cypher like MATCH ()-[:imports]->()
+# works in the Neo4j MCP server. The type is interpolated - Cypher cannot
+# parameterise relationship types - so it is always passed through _rel_type
+# first, and that whitelist regex is the injection guard. Doubled braces are
+# literal braces for str.format.
+UPSERT_EDGES_TEMPLATE = """
+UNWIND $rows AS row
+MATCH (a:CodeNode {{id: row.source}})
+MATCH (b:CodeNode {{id: row.target}})
+MERGE (a)-[r:{rel}]->(b)
+SET r += row.props
+"""
+_REL_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+ENSURE_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.id)"
+ENSURE_REPO_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.repo)"
+
+BATCH = 1000
+
+
+def _scalar(value):
+    """Neo4j properties must be primitives or arrays of primitives.
+
+    dict/list/tuple are JSON-encoded (not str()'d) so the stored value stays
+    parseable instead of becoming a Python repr.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
+def _rel_type(relation: str) -> str:
+    """Sanitise a relation name into a legal Cypher relationship type."""
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", relation.strip()) or "RELATED"
+    if not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = f"_{cleaned}"
+    if not _REL_TYPE_RE.match(cleaned):
+        raise ValueError(f"cannot make a safe relationship type from {relation!r}")
+    return cleaned
+
+
+def preflight_capacity(graph, node_limit: int = AURA_FREE_NODE_LIMIT,
+                       rel_limit: int = AURA_FREE_REL_LIMIT):
+    """Return (ok, message). Refuse rather than half-push.
+
+    Aura Free caps nodes and relationships separately, so check both.
+    """
+    n, m = graph.number_of_nodes(), graph.number_of_edges()
+    problems = []
+    if n > node_limit:
+        problems.append(f"{n} nodes exceeds the node limit of {node_limit}")
+    if m > rel_limit:
+        problems.append(f"{m} relationships exceeds the relationship limit of {rel_limit}")
+    if problems:
+        return False, "; ".join(problems) + "; reduce repos.yaml or upgrade the instance"
+    return True, (
+        f"capacity ok: {n} nodes / {m} relationships against limits of "
+        f"{node_limit} / {rel_limit}"
+    )
+
+
+def _tags_in_graph(graph) -> set[str]:
+    return {
+        d["repo"] for _, d in graph.nodes(data=True) if d.get("repo")
+    }
+
+
+def _chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def push_global_graph(graph, settings: Settings, tags: set[str], *,
+                      dry_run: bool = False, driver=None) -> list[str]:
+    """Reap then re-push each tag's slice. Externals are pushed once, shared."""
+    present = _tags_in_graph(graph)
+    unknown = tags - present
+    if unknown:
+        raise ValueError(
+            f"tag(s) {sorted(unknown)} not present in the graph "
+            f"(present: {sorted(present)})"
+        )
+
+    ok, capacity_msg = preflight_capacity(graph)
+    lines = [capacity_msg]
+    if not ok:
+        return lines
+
+    if dry_run:
+        for tag in sorted(tags):
+            count = sum(1 for _, d in graph.nodes(data=True) if d.get("repo") == tag)
+            lines.append(f"dry run: would reap and push {count} nodes for {tag!r}")
+        return lines
+
+    own_driver = driver is None
+    driver = driver or connect(settings)
+    try:
+        database = resolve_database(driver, settings.neo4j_database)
+        with driver.session(database=database) as session:
+            session.run(ENSURE_INDEX).consume()
+            session.run(ENSURE_REPO_INDEX).consume()
+
+            for tag in sorted(tags):
+                session.run(REAP_REPO, tag=tag).consume()
+                lines.append(f"reaped {tag!r}")
+
+            # The requested repos' nodes, plus every external stub: externals
+            # are shared across repos and MERGE makes re-pushing them idempotent.
+            node_rows = [
+                {
+                    "id": nid,
+                    "props": {k: _scalar(v) for k, v in data.items()},
+                }
+                for nid, data in graph.nodes(data=True)
+                if data.get("repo") in tags or data.get("external")
+            ]
+            ids = {r["id"] for r in node_rows}
+            for batch in _chunks(node_rows, BATCH):
+                session.run(UPSERT_NODES, rows=batch).consume()
+            lines.append(f"upserted {len(node_rows)} nodes")
+
+            # Group edges by relationship type. build_from_json(directed=False)
+            # yields (u, v) in arbitrary order; graphify keeps the true direction
+            # in _src/_tgt, which is what "what calls X" in Cypher depends on.
+            by_rel: dict[str, list[dict]] = {}
+            for u, v, data in graph.edges(data=True):
+                if u not in ids or v not in ids:
+                    continue  # the other endpoint belongs to a repo not in this push
+                source, target = data.get("_src", u), data.get("_tgt", v)
+                if source not in ids or target not in ids:
+                    source, target = u, v
+                rel = _rel_type(str(data.get("relation") or "RELATED"))
+                by_rel.setdefault(rel, []).append({
+                    "source": source,
+                    "target": target,
+                    "props": {k: _scalar(val) for k, val in data.items()
+                              if not k.startswith("_")},
+                })
+            total_edges = 0
+            for rel, rows in sorted(by_rel.items()):
+                statement = UPSERT_EDGES_TEMPLATE.format(rel=rel)
+                for batch in _chunks(rows, BATCH):
+                    session.run(statement, rows=batch).consume()
+                total_edges += len(rows)
+            lines.append(
+                f"upserted {total_edges} edges across {len(by_rel)} relationship types"
+            )
+
+            session.run(REAP_ORPHAN_EXTERNALS).consume()
+            lines.append("swept orphaned external nodes")
+    finally:
+        if own_driver:
+            driver.close()
+    return lines

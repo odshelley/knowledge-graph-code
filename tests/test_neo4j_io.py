@@ -93,3 +93,13 @@ def test_doctor_reports_unreachable_without_leaking_password():
     report = doctor(SETTINGS, driver=_Broken())
     assert report.reachable is False
     assert "secret" not in report.message
+
+
+def test_doctor_reports_unreachable_without_leaking_password_on_connect_failure(monkeypatch):
+    def _broken_connect(settings):
+        raise ValueError("bad uri neo4j+s://x with password secret")
+
+    monkeypatch.setattr("kgc.neo4j_io.connect", _broken_connect)
+    report = doctor(SETTINGS)
+    assert report.reachable is False
+    assert "secret" not in report.message

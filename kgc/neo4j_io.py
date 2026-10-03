@@ -15,7 +15,7 @@ COUNT_NODES = "MATCH (n) RETURN count(n) AS nodes"
 COUNT_RELS = "MATCH ()-[r]->() RETURN count(r) AS rels"
 SERVER_VERSION = (
     "CALL dbms.components() YIELD versions "
-    "RETURN head(versions) AS version"
+    "RETURN head(versions) AS version LIMIT 1"
 )
 
 
@@ -65,8 +65,9 @@ def resolve_database(driver, configured: str) -> str:
 
 def doctor(settings: Settings, driver=None) -> DoctorReport:
     own_driver = driver is None
-    driver = driver or connect(settings)
     try:
+        if driver is None:
+            driver = connect(settings)
         database = resolve_database(driver, settings.neo4j_database)
         with driver.session(database=database) as session:
             nodes = session.run(COUNT_NODES).single()["nodes"]
@@ -93,5 +94,5 @@ def doctor(settings: Settings, driver=None) -> DoctorReport:
             message=_scrub(f"{type(exc).__name__}: {exc}", settings.neo4j_password),
         )
     finally:
-        if own_driver:
+        if own_driver and driver is not None:
             driver.close()

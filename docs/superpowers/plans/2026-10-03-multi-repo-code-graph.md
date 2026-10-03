@@ -202,6 +202,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 ```
 
 - [ ] **Step 4: Create the venv and install**
@@ -626,7 +627,7 @@ print(r)
 "
 ```
 
-Expected: `reachable=True` and a database name. **Record which name worked** — Task 5 uses it. If `reachable=False` because the instance is paused, resume it at https://console.neo4j.io and retry; Aura Free pauses after 3 days idle.
+Expected: `reachable=True` and a database name. **If the resolved database differs from `NEO4J_DATABASE` in `.env`, edit `.env` to the resolved name now** — `.env` is the single source of truth that both `kgc push` (Task 5) and the Neo4j MCP server (Task 6) read, and they must agree. If `reachable=False` because the instance is paused, resume it at https://console.neo4j.io and retry; Aura Free pauses after 3 days idle.
 
 - [ ] **Step 6: Commit**
 
@@ -691,18 +692,28 @@ def test_extract_repo_produces_graph_and_costs_no_tokens(tmp_path):
     assert res.graph_path == tmp_path / "graphify-out" / "graph.json"
 
 
-def test_extract_repo_graph_contains_no_document_nodes(tmp_path):
+def test_extract_repo_graph_has_only_python_sources_and_communities(tmp_path):
     import json
-    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "a.py").write_text("import os\n\ndef f():\n    return os.getcwd()\n")
     (tmp_path / "GUIDE.md").write_text("# a guide\n\nlots of prose here\n")
     repo = Repo(path=tmp_path, tag="fixture", enabled=True)
 
     res = extract_repo(repo)
     data = json.loads(res.graph_path.read_text())
-    types = {n.get("file_type") for n in data["nodes"]}
 
-    assert "document" not in types
-    assert "paper" not in types
+    # The real invariant is provenance, not file_type: the AST pass legitimately
+    # emits docstring-derived 'rationale'/'concept' nodes FROM .py files. Every
+    # sourced node must come from a .py; the only unsourced nodes are external
+    # stubs (here: 'os'). Nothing may originate from GUIDE.md.
+    for n in data["nodes"]:
+        src = n.get("source_file")
+        if src:
+            assert src.endswith(".py"), n
+        else:
+            assert n.get("external") is True, n
+
+    # graphify's MCP server reconstructs communities from this attribute.
+    assert all("community" in n for n in data["nodes"])
 
 
 def test_extract_repo_missing_path_raises(tmp_path):
@@ -736,8 +747,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from graphify.build import build_from_json
+from graphify.cluster import cluster
 from graphify.detect import detect
 from graphify.extract import collect_files, extract
+from networkx.readwrite import json_graph
 
 from kgc.config import Repo
 
@@ -799,8 +812,19 @@ def extract_repo(repo: Repo) -> ExtractResult:
 
     graph = build_from_json(extraction, root=str(repo.path))
 
+    # Cluster and stamp 'community' on every node. graphify's MCP server
+    # reconstructs communities from this attribute (get_community, god_nodes by
+    # community) and global_add offsets it so repos' community ids stay apart.
+    # Skipping this degrades both silently. Deliberately NOT graphify.export.to_json:
+    # that carries the #479 shrink-guard, which would refuse to write a graph that
+    # legitimately got smaller after code was deleted.
+    communities = cluster(graph)
+    for cid, members in communities.items():
+        for nid in members:
+            if nid in graph:
+                graph.nodes[nid]["community"] = int(cid)
+
     # Write the graph.json shape global_add consumes (node-link with 'links').
-    from networkx.readwrite import json_graph
     payload = json_graph.node_link_data(graph, edges="links")
     graph_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -1170,12 +1194,19 @@ SETTINGS = Settings(
 
 
 def _graph():
+    # Mirrors what global_add produces: repo-local ids prefixed "{tag}::",
+    # a shared unprefixed external stub, and true direction kept in _src/_tgt
+    # (the Graph itself is undirected, so (u, v) order is arbitrary).
     g = nx.Graph()
     g.add_node("alpha::mod_f", label="f", file_type="code", repo="alpha")
     g.add_node("beta::mod_g", label="g", file_type="code", repo="beta")
     g.add_node("numpy", label="numpy", file_type="code", external=True)
-    g.add_edge("alpha::mod_f", "numpy", relation="imports", confidence="EXTRACTED")
-    g.add_edge("beta::mod_g", "numpy", relation="imports", confidence="EXTRACTED")
+    g.add_edge("alpha::mod_f", "numpy", relation="imports", confidence="EXTRACTED",
+               _src="alpha::mod_f", _tgt="numpy")
+    g.add_edge("beta::mod_g", "numpy", relation="imports", confidence="EXTRACTED",
+               _src="beta::mod_g", _tgt="numpy")
+    g.add_edge("alpha::mod_f", "beta::mod_g", relation="calls", confidence="EXTRACTED",
+               _src="beta::mod_g", _tgt="alpha::mod_f")  # beta calls alpha
     return g
 
 
@@ -1193,16 +1224,33 @@ def test_reap_orphan_externals_only_targets_unreferenced_externals():
     assert "$tag" not in REAP_ORPHAN_EXTERNALS
 
 
-def test_preflight_capacity_passes_under_limit():
-    ok, msg = preflight_capacity(_graph(), limit=1000)
+def test_preflight_capacity_passes_under_limits():
+    ok, msg = preflight_capacity(_graph(), node_limit=1000, rel_limit=1000)
     assert ok is True
-    assert "3" in msg
+    assert "3 nodes" in msg
 
 
-def test_preflight_capacity_fails_over_limit():
-    ok, msg = preflight_capacity(_graph(), limit=2)
+def test_preflight_capacity_fails_over_node_limit():
+    ok, msg = preflight_capacity(_graph(), node_limit=2, rel_limit=1000)
     assert ok is False
-    assert "exceeds" in msg
+    assert "node limit" in msg
+
+
+def test_preflight_capacity_fails_over_relationship_limit():
+    # Aura Free's relationship cap is a separate ceiling from the node cap.
+    ok, msg = preflight_capacity(_graph(), node_limit=1000, rel_limit=1)
+    assert ok is False
+    assert "relationship limit" in msg
+
+
+def test_rel_type_sanitises_an_injection_attempt():
+    # Relationship types cannot be parameterised in Cypher, so this string is
+    # interpolated. The sanitiser is the injection guard.
+    from kgc.neo4j_io import _rel_type
+    out = _rel_type("imports]->(x) DETACH DELETE x //")
+    assert all(ch.isalnum() or ch == "_" for ch in out)
+    assert out[0].isalpha() or out[0] == "_"
+    assert _rel_type("imports") == "imports"
 
 
 class _Recorder:
@@ -1258,6 +1306,32 @@ def test_push_refuses_unknown_tag():
     driver = _RecordingDriver()
     with pytest.raises(ValueError, match="not present in the graph"):
         push_global_graph(_graph(), SETTINGS, {"nonexistent"}, driver=driver)
+
+
+def _edge_statements(driver):
+    return [(q, p) for q, p in driver.session_obj.calls if "[r:" in q]
+
+
+def test_push_emits_one_statement_per_relationship_type():
+    # Real relationship types, not a single :RELATES with a 'relation' property,
+    # so Cypher like MATCH ()-[:imports]->() works in the Neo4j MCP server.
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha", "beta"}, driver=driver)
+    rel_types = {q.split("[r:")[1].split("]")[0] for q, _ in _edge_statements(driver)}
+    assert {t.lower() for t in rel_types} == {"imports", "calls"}
+
+
+def test_push_preserves_true_edge_direction():
+    # The undirected Graph yields (u, v) in arbitrary order; the push must use
+    # _src/_tgt so "what calls X" is answerable in Cypher.
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha", "beta"}, driver=driver)
+    calls_rows = [row for q, p in _edge_statements(driver)
+                  if "calls" in q.lower() for row in p["rows"]]
+    (row,) = calls_rows
+    assert row["source"] == "beta::mod_g"
+    assert row["target"] == "alpha::mod_f"
+    assert "_src" not in row["props"] and "_tgt" not in row["props"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1267,6 +1341,14 @@ Expected: FAIL — `ImportError: cannot import name 'REAP_REPO'`
 
 - [ ] **Step 3: Append the push implementation to `kgc/neo4j_io.py`**
 
+First add one import to the top of the file, alongside the existing ones:
+
+```python
+import re
+```
+
+Then append:
+
 ```python
 # --- append to kgc/neo4j_io.py ---
 
@@ -1274,6 +1356,7 @@ Expected: FAIL — `ImportError: cannot import name 'REAP_REPO'`
 # pricing page says 50k / 175k. Use the lower pair so we fail early rather
 # than half-pushing.
 AURA_FREE_NODE_LIMIT = 50_000
+AURA_FREE_REL_LIMIT = 175_000
 
 # The only destructive queries in the project. Both are deliberately narrow.
 # REAP_REPO is scoped on the 'repo' property that graphify's
@@ -1298,13 +1381,19 @@ MERGE (n:CodeNode {id: row.id})
 SET n += row.props
 """
 
-UPSERT_EDGES = """
+# One statement per relationship type, so Cypher like MATCH ()-[:imports]->()
+# works in the Neo4j MCP server. The type is interpolated - Cypher cannot
+# parameterise relationship types - so it is always passed through _rel_type
+# first, and that whitelist regex is the injection guard. Doubled braces are
+# literal braces for str.format.
+UPSERT_EDGES_TEMPLATE = """
 UNWIND $rows AS row
-MATCH (a:CodeNode {id: row.source})
-MATCH (b:CodeNode {id: row.target})
-MERGE (a)-[r:RELATES {relation: row.relation}]->(b)
+MATCH (a:CodeNode {{id: row.source}})
+MATCH (b:CodeNode {{id: row.target}})
+MERGE (a)-[r:{rel}]->(b)
 SET r += row.props
 """
+_REL_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 ENSURE_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.id)"
 ENSURE_REPO_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.repo)"
@@ -1319,15 +1408,34 @@ def _scalar(value):
     return str(value)
 
 
-def preflight_capacity(graph, limit: int = AURA_FREE_NODE_LIMIT):
-    """Return (ok, message). Refuse rather than half-push."""
-    n = graph.number_of_nodes()
-    if n > limit:
-        return False, (
-            f"graph has {n} nodes which exceeds the configured limit of {limit}; "
-            "reduce repos.yaml or upgrade the instance"
-        )
-    return True, f"capacity ok: {n} nodes against a limit of {limit}"
+def _rel_type(relation: str) -> str:
+    """Sanitise a relation name into a legal Cypher relationship type."""
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", relation.strip()) or "RELATED"
+    if not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = f"_{cleaned}"
+    if not _REL_TYPE_RE.match(cleaned):
+        raise ValueError(f"cannot make a safe relationship type from {relation!r}")
+    return cleaned
+
+
+def preflight_capacity(graph, node_limit: int = AURA_FREE_NODE_LIMIT,
+                       rel_limit: int = AURA_FREE_REL_LIMIT):
+    """Return (ok, message). Refuse rather than half-push.
+
+    Aura Free caps nodes and relationships separately, so check both.
+    """
+    n, m = graph.number_of_nodes(), graph.number_of_edges()
+    problems = []
+    if n > node_limit:
+        problems.append(f"{n} nodes exceeds the node limit of {node_limit}")
+    if m > rel_limit:
+        problems.append(f"{m} relationships exceeds the relationship limit of {rel_limit}")
+    if problems:
+        return False, "; ".join(problems) + "; reduce repos.yaml or upgrade the instance"
+    return True, (
+        f"capacity ok: {n} nodes / {m} relationships against limits of "
+        f"{node_limit} / {rel_limit}"
+    )
 
 
 def _tags_in_graph(graph) -> set[str]:
@@ -1375,33 +1483,47 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
                 session.run(REAP_REPO, tag=tag).consume()
                 lines.append(f"reaped {tag!r}")
 
-            wanted = tags | {None}
+            # The requested repos' nodes, plus every external stub: externals
+            # are shared across repos and MERGE makes re-pushing them idempotent.
             node_rows = [
                 {
                     "id": nid,
                     "props": {k: _scalar(v) for k, v in data.items()},
                 }
                 for nid, data in graph.nodes(data=True)
-                if data.get("repo") in wanted or data.get("external")
+                if data.get("repo") in tags or data.get("external")
             ]
             ids = {r["id"] for r in node_rows}
             for batch in _chunks(node_rows, BATCH):
                 session.run(UPSERT_NODES, rows=batch).consume()
             lines.append(f"upserted {len(node_rows)} nodes")
 
-            edge_rows = [
-                {
-                    "source": u,
-                    "target": v,
-                    "relation": str(data.get("relation") or "RELATED"),
-                    "props": {k: _scalar(val) for k, val in data.items()},
-                }
-                for u, v, data in graph.edges(data=True)
-                if u in ids and v in ids
-            ]
-            for batch in _chunks(edge_rows, BATCH):
-                session.run(UPSERT_EDGES, rows=batch).consume()
-            lines.append(f"upserted {len(edge_rows)} edges")
+            # Group edges by relationship type. build_from_json(directed=False)
+            # yields (u, v) in arbitrary order; graphify keeps the true direction
+            # in _src/_tgt, which is what "what calls X" in Cypher depends on.
+            by_rel: dict[str, list[dict]] = {}
+            for u, v, data in graph.edges(data=True):
+                if u not in ids or v not in ids:
+                    continue  # the other endpoint belongs to a repo not in this push
+                source, target = data.get("_src", u), data.get("_tgt", v)
+                if source not in ids or target not in ids:
+                    source, target = u, v
+                rel = _rel_type(str(data.get("relation") or "RELATED"))
+                by_rel.setdefault(rel, []).append({
+                    "source": source,
+                    "target": target,
+                    "props": {k: _scalar(val) for k, val in data.items()
+                              if not k.startswith("_")},
+                })
+            total_edges = 0
+            for rel, rows in sorted(by_rel.items()):
+                statement = UPSERT_EDGES_TEMPLATE.format(rel=rel)
+                for batch in _chunks(rows, BATCH):
+                    session.run(statement, rows=batch).consume()
+                total_edges += len(rows)
+            lines.append(
+                f"upserted {total_edges} edges across {len(by_rel)} relationship types"
+            )
 
             session.run(REAP_ORPHAN_EXTERNALS).consume()
             lines.append("swept orphaned external nodes")
@@ -1414,7 +1536,7 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_push.py -v`
-Expected: 8 passed
+Expected: 11 passed
 
 - [ ] **Step 5: Dry run, then push for real**
 
@@ -1475,11 +1597,20 @@ def test_graphify_server_points_at_the_global_graph():
     assert "/tmp/global-graph.json" in " ".join(args)
 
 
-def test_neo4j_server_is_read_only():
+def test_neo4j_server_is_read_only_and_token_capped():
     cfg = build_config(SETTINGS, Path("/tmp/g.json"), Path("/usr/bin/python3"))
     neo = cfg["mcpServers"]["neo4j"]
-    joined = " ".join(neo.get("args", [])) + " " + " ".join(neo.get("env", {}))
+    assert "--read-only" in neo["args"]
+    assert "--token-limit" in neo["args"]
+    joined = " ".join(neo.get("args", []))
     assert "write" not in joined.lower()
+
+
+def test_neo4j_password_is_in_env_never_argv():
+    # argv is readable by `ps`; the password goes only through the environment.
+    cfg = build_config(SETTINGS, Path("/tmp/g.json"), Path("/usr/bin/python3"))
+    neo = cfg["mcpServers"]["neo4j"]
+    assert "secret" not in " ".join(neo["args"])
     assert neo["env"]["NEO4J_PASSWORD"] == "secret"
 ```
 
@@ -1518,17 +1649,23 @@ def build_config(settings: Settings, graph_path: Path, python_path: Path) -> dic
                 "command": str(python_path),
                 "args": ["-m", "graphify.serve", str(graph_path)],
             },
-            # Precise path: read-only Cypher. write-cypher is deliberately not
-            # enabled - only kgc writes to this database.
+            # Precise path: read-only Cypher, with the result size capped so a
+            # careless MATCH (n) RETURN n cannot blow the token budget. Only
+            # kgc writes to this database. Flags verified against
+            # `uvx mcp-neo4j-cypher@latest --help` on 2026-10-03.
             "neo4j": {
                 "command": "uvx",
-                "args": ["mcp-neo4j-cypher@latest", "--read-only"],
-                "env": {
-                    "NEO4J_URI": settings.neo4j_uri,
-                    "NEO4J_USERNAME": settings.neo4j_username,
-                    "NEO4J_PASSWORD": settings.neo4j_password,
-                    "NEO4J_DATABASE": settings.neo4j_database,
-                },
+                "args": [
+                    "mcp-neo4j-cypher@latest",
+                    "--read-only",
+                    "--token-limit", "4000",
+                    "--db-url", settings.neo4j_uri,
+                    "--username", settings.neo4j_username,
+                    "--database", settings.neo4j_database,
+                ],
+                # The password goes through the environment only - never argv,
+                # which any local process can read via `ps`.
+                "env": {"NEO4J_PASSWORD": settings.neo4j_password},
             },
         }
     }
@@ -1551,7 +1688,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_setup_mcp.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 5: Generate the config and verify both servers start**
 
@@ -1561,9 +1698,11 @@ Expected: 3 passed
 ```
 
 Then restart Claude Code in this directory and confirm both servers appear via
-`/mcp`. If `mcp-neo4j-cypher` rejects `--read-only`, check its actual flag with
-`uvx mcp-neo4j-cypher@latest --help` and correct `setup_mcp.py` — the
-requirement is that no write tool is exposed, however that is spelled.
+`/mcp`. `--read-only` and `--token-limit` were verified against
+`uvx mcp-neo4j-cypher@latest --help` on 2026-10-03. If the Neo4j server fails
+to authenticate, the one unverified assumption is that it reads the password
+from the `NEO4J_PASSWORD` environment variable; confirm against its README
+before falling back to `--password` on argv (which `ps` can read).
 
 - [ ] **Step 6: Commit**
 
@@ -1610,7 +1749,12 @@ Record tokens, wall time, and a correctness verdict judged against the code.
 
 ## Cross-repo (4) — unanswerable before this POC
 
-5. Which of the five repos depend on `dagster`?
+External modules become shared stub nodes only for **import-family** edges
+(graphify #2873); an external *call* target is deliberately not stubbed (#3156).
+So "which repos import X" is answerable; "which repos call external function Y"
+is not. Q5 and Q8 are phrased accordingly.
+
+5. Which of the five repos import `dagster`?
 6. Which repos define a type or class with the same name as one in another repo?
 7. `knowledge-retrieval` and `graphify` both build graphs from extraction JSON.
    Where does each do it, and do they share any code?
@@ -1715,3 +1859,16 @@ reused by `push_global_graph` (Task 5) — same module, no re-definition.
 is referenced by `_cmd_push` in Task 4 and defined in Task 5: Task 4's import is
 function-local so Task 4's tests pass before Task 5 exists, but **`kgc push` does
 not work until Task 5 is complete** — flagged so the order is not mistaken for a bug.
+
+**Second-pass review (2026-10-03, after writing).** Verified against the installed
+package rather than assumed: external stubs *are* minted by `build_from_json` for
+import-family edges (45 in today's `knowledge-retrieval` graph), `python -m
+graphify.serve <graph>` is the real MCP entry point (also `graphify-mcp`), and
+`mcp-neo4j-cypher` really has `--read-only` and `--token-limit`. Defects found in
+the first draft and fixed above: (1) `extract_repo` did not cluster, so nodes
+lacked the `community` attribute the MCP server and `global_add` rely on; (2) the
+Neo4j push discarded true edge direction by ignoring `_src`/`_tgt`; (3) all
+relations were collapsed into one `:RELATES` type, making `MATCH ()-[:imports]->()`
+impossible; (4) the code-only test asserted on `file_type`, which the AST pass
+legitimately sets to `rationale` for docstring nodes — the invariant is `.py`
+provenance; (5) `preflight_capacity` ignored Aura's separate relationship cap.

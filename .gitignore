@@ -1,0 +1,8 @@
+# Credentials — never commit.
+.env
+.env.*
+!.env.example
+
+# graphify outputs (regenerable; can be large)
+graphify-out/
+**/graphify-out/

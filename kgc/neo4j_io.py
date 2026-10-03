@@ -228,8 +228,8 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
         return lines
 
     own_driver = driver is None
-    driver = driver or connect(settings)
     try:
+        driver = driver or connect(settings)
         database = resolve_database(driver, settings.neo4j_database)
         with driver.session(database=database) as session:
             session.run(ENSURE_INDEX).consume()
@@ -283,7 +283,11 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
 
             session.run(REAP_ORPHAN_EXTERNALS).consume()
             lines.append("swept orphaned external nodes")
+    except Exception as exc:  # noqa: BLE001 - scrub before it can reach a log
+        raise RuntimeError(
+            _scrub(f"{type(exc).__name__}: {exc}", settings.neo4j_password)
+        ) from None
     finally:
-        if own_driver:
+        if own_driver and driver is not None:
             driver.close()
     return lines

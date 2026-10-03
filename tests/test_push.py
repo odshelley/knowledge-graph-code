@@ -155,3 +155,31 @@ def test_push_preserves_true_edge_direction():
     assert row["source"] == "beta::mod_g"
     assert row["target"] == "alpha::mod_f"
     assert "_src" not in row["props"] and "_tgt" not in row["props"]
+
+
+def test_push_scrubs_password_from_driver_errors():
+    # Driver exceptions routinely include the connection string. The probe
+    # session (resolve_database's first call) must succeed so the failure
+    # surfaces from the real work session, carrying the password text that
+    # the fix is responsible for scrubbing before it reaches a traceback.
+    class _AuthFailingDriver:
+        def __init__(self):
+            self.calls = 0
+
+        def session(self, database=None):
+            self.calls += 1
+            if self.calls == 1:
+                return _Recorder()
+            raise RuntimeError(
+                "auth failed for neo4j+s://x with password secret"
+            )
+
+        def close(self):
+            pass
+
+    driver = _AuthFailingDriver()
+    with pytest.raises(RuntimeError) as ei:
+        push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver)
+    assert "secret" not in str(ei.value)
+    assert "***" in str(ei.value)
+    assert ei.value.__cause__ is None

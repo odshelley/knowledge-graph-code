@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import networkx as nx
+
 from kgc.cli import main
 from kgc.config import Repo, Settings
 
@@ -48,3 +50,37 @@ def test_push_returns_1_when_no_global_graph_exists(monkeypatch, tmp_path):
     result = main(["push"])
 
     assert result == 1
+
+
+def test_push_reports_failure_cleanly(monkeypatch, capsys):
+    tag = "x"
+    monkeypatch.setattr(
+        "kgc.cli.load_settings",
+        lambda path: Settings(
+            neo4j_uri="bolt://example",
+            neo4j_username="neo4j",
+            neo4j_password="secret",
+            neo4j_database="neo4j",
+        ),
+    )
+    monkeypatch.setattr(
+        "kgc.cli.load_repos",
+        lambda path: [Repo(path=Path("."), tag=tag, enabled=True)],
+    )
+
+    graph = nx.Graph()
+    graph.add_node("x::n", repo=tag)
+    monkeypatch.setattr("kgc.cli.load_global_graph", lambda: graph)
+
+    # _cmd_push imports push_global_graph from kgc.neo4j_io locally at call
+    # time, so the patch target is the function's home module, not kgc.cli.
+    def fake_push_global_graph(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("kgc.neo4j_io.push_global_graph", fake_push_global_graph)
+
+    result = main(["push"])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "push failed: boom" in captured.err

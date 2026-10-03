@@ -37,7 +37,7 @@ def test_build_normalises_global_graph_once(monkeypatch, capsys):
 
     def fake_normalize_direction(path):
         calls.append(path)
-        return 3
+        return 3, 2
 
     monkeypatch.setattr("kgc.cli.normalize_direction", fake_normalize_direction)
     monkeypatch.setattr("kgc.cli.load_global_graph", lambda: nx.Graph())
@@ -47,7 +47,7 @@ def test_build_normalises_global_graph_once(monkeypatch, capsys):
     assert result == 0
     assert len(calls) == 1
     captured = capsys.readouterr()
-    assert "normalised direction on 3 edges" in captured.out
+    assert "normalised direction on 3 edges (2 skipped: stale markers)" in captured.out
 
 
 def test_push_returns_1_when_no_global_graph_exists(monkeypatch, tmp_path):

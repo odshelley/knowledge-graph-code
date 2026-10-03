@@ -67,16 +67,16 @@ def test_merge_repo_propagates_skipped(monkeypatch, tmp_path):
 def test_normalize_direction_rewrites_reversed_links_and_is_idempotent(tmp_path):
     graph_path = tmp_path / "graph.json"
     graph_path.write_text(json.dumps({
-        "nodes": [{"id": "a"}, {"id": "b"}],
+        "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}],
         "links": [
             {"source": "b", "target": "a", "_src": "a", "_tgt": "b"},
             {"source": "c", "target": "d", "_src": "c", "_tgt": "d"},
         ],
     }))
 
-    changed = normalize_direction(graph_path)
+    changed, skipped = normalize_direction(graph_path)
 
-    assert changed == 1
+    assert (changed, skipped) == (1, 0)
     data = json.loads(graph_path.read_text())
     reversed_link, correct_link = data["links"]
     assert reversed_link["source"] == "a"
@@ -86,4 +86,4 @@ def test_normalize_direction_rewrites_reversed_links_and_is_idempotent(tmp_path)
     assert correct_link["source"] == "c"
     assert correct_link["target"] == "d"
 
-    assert normalize_direction(graph_path) == 0
+    assert normalize_direction(graph_path) == (0, 0)

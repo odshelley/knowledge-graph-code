@@ -21,6 +21,7 @@ from graphify.extract import collect_files, extract
 from networkx.readwrite import json_graph
 
 from kgc.config import Repo
+from kgc.direction import reorient_links
 
 NON_CODE_CATEGORIES = ("document", "paper", "image", "video")
 
@@ -54,30 +55,6 @@ def code_only_detect(root: Path) -> dict:
         files[category] = []
     result["total_files"] = len(files.get("code", []))
     return result
-
-
-def _reorient_links(links: list[dict]) -> int:
-    """Rewrite each link's source/target from its _src/_tgt markers in place.
-
-    Duplicated from kgc.globalgraph._reorient_links rather than imported:
-    globalgraph.py imports ExtractResult from this module, so importing
-    globalgraph back into extract.py would be a circular import. graphify
-    stores true edge direction in _src/_tgt but several of its own consumers
-    (serve._load_graph, affected.py) trust the raw source/target order
-    instead; graphify's export.to_json compensates (#563), this writer did
-    not. Keeps the markers - the Neo4j push reads them. Returns the number
-    of links changed.
-    """
-    changed = 0
-    for link in links:
-        src, tgt = link.get("_src"), link.get("_tgt")
-        if src is None or tgt is None:
-            continue
-        if (link.get("source"), link.get("target")) != (src, tgt):
-            link["source"] = src
-            link["target"] = tgt
-            changed += 1
-    return changed
 
 
 def extract_repo(repo: Repo) -> ExtractResult:
@@ -129,7 +106,7 @@ def extract_repo(repo: Repo) -> ExtractResult:
 
     # Write the graph.json shape global_add consumes (node-link with 'links').
     payload = json_graph.node_link_data(graph, edges="links")
-    _reorient_links(payload["links"])
+    reorient_links(payload["links"], set(graph.nodes))
     graph_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     return ExtractResult(

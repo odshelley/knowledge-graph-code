@@ -66,11 +66,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
               f"{extracted.seconds:6.2f}s  {state}")
 
     try:
-        changed = normalize_direction(global_graph_path())
+        changed, skipped = normalize_direction(global_graph_path())
     except FileNotFoundError as exc:
         print(f"no global graph to normalise: {exc}", file=sys.stderr)
     else:
-        print(f"normalised direction on {changed} edges")
+        print(f"normalised direction on {changed} edges "
+              f"({skipped} skipped: stale markers)")
 
     try:
         graph = load_global_graph()

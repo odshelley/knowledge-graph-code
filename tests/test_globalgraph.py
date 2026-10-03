@@ -1,6 +1,12 @@
+import json
 from pathlib import Path
 from kgc.extract import ExtractResult
-from kgc.globalgraph import merge_repo, MergeResult, global_graph_path
+from kgc.globalgraph import (
+    merge_repo,
+    MergeResult,
+    global_graph_path,
+    normalize_direction,
+)
 
 
 def test_global_graph_path_is_under_home_graphify():
@@ -56,3 +62,28 @@ def test_merge_repo_propagates_skipped(monkeypatch, tmp_path):
                       seconds=0.0, graph_path=graph_path)
     )
     assert res.skipped is True
+
+
+def test_normalize_direction_rewrites_reversed_links_and_is_idempotent(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({
+        "nodes": [{"id": "a"}, {"id": "b"}],
+        "links": [
+            {"source": "b", "target": "a", "_src": "a", "_tgt": "b"},
+            {"source": "c", "target": "d", "_src": "c", "_tgt": "d"},
+        ],
+    }))
+
+    changed = normalize_direction(graph_path)
+
+    assert changed == 1
+    data = json.loads(graph_path.read_text())
+    reversed_link, correct_link = data["links"]
+    assert reversed_link["source"] == "a"
+    assert reversed_link["target"] == "b"
+    assert reversed_link["_src"] == "a"
+    assert reversed_link["_tgt"] == "b"
+    assert correct_link["source"] == "c"
+    assert correct_link["target"] == "d"
+
+    assert normalize_direction(graph_path) == 0

@@ -60,6 +60,24 @@ def test_extract_repo_graph_has_only_python_sources_and_communities(tmp_path):
     assert all("community" in n for n in data["nodes"])
 
 
+def test_extract_repo_writes_normalised_direction(tmp_path):
+    import json
+    (tmp_path / "a.py").write_text(
+        "def helper():\n    return 2\n\n\ndef caller():\n    return helper()\n"
+    )
+    repo = Repo(path=tmp_path, tag="fixture", enabled=True)
+
+    res = extract_repo(repo)
+    data = json.loads(res.graph_path.read_text())
+
+    links = data.get("links", data.get("edges", []))
+    marked = [link for link in links if "_src" in link and "_tgt" in link]
+    assert marked, "expected at least one link with _src/_tgt markers"
+    for link in marked:
+        assert link["source"] == link["_src"]
+        assert link["target"] == link["_tgt"]
+
+
 def test_extract_repo_missing_path_raises(tmp_path):
     repo = Repo(path=tmp_path / "absent", tag="x", enabled=True)
     with pytest.raises(FileNotFoundError):

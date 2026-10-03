@@ -56,6 +56,30 @@ def code_only_detect(root: Path) -> dict:
     return result
 
 
+def _reorient_links(links: list[dict]) -> int:
+    """Rewrite each link's source/target from its _src/_tgt markers in place.
+
+    Duplicated from kgc.globalgraph._reorient_links rather than imported:
+    globalgraph.py imports ExtractResult from this module, so importing
+    globalgraph back into extract.py would be a circular import. graphify
+    stores true edge direction in _src/_tgt but several of its own consumers
+    (serve._load_graph, affected.py) trust the raw source/target order
+    instead; graphify's export.to_json compensates (#563), this writer did
+    not. Keeps the markers - the Neo4j push reads them. Returns the number
+    of links changed.
+    """
+    changed = 0
+    for link in links:
+        src, tgt = link.get("_src"), link.get("_tgt")
+        if src is None or tgt is None:
+            continue
+        if (link.get("source"), link.get("target")) != (src, tgt):
+            link["source"] = src
+            link["target"] = tgt
+            changed += 1
+    return changed
+
+
 def extract_repo(repo: Repo) -> ExtractResult:
     """Extract one repo to <repo>/graphify-out/graph.json. No LLM, no tokens."""
     if not repo.path.exists():
@@ -105,6 +129,7 @@ def extract_repo(repo: Repo) -> ExtractResult:
 
     # Write the graph.json shape global_add consumes (node-link with 'links').
     payload = json_graph.node_link_data(graph, edges="links")
+    _reorient_links(payload["links"])
     graph_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     return ExtractResult(

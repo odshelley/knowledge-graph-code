@@ -13,7 +13,13 @@ from pathlib import Path
 
 from kgc.config import load_repos, load_settings
 from kgc.extract import extract_repo
-from kgc.globalgraph import load_global_graph, merge_repo, registered_repos
+from kgc.globalgraph import (
+    global_graph_path,
+    load_global_graph,
+    merge_repo,
+    normalize_direction,
+    registered_repos,
+)
 
 ENV_PATH = Path(".env")
 REPOS_PATH = Path("repos.yaml")
@@ -58,6 +64,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
         )
         print(f"  {repo.tag:26s} {extracted.nodes:6d}n {extracted.edges:6d}e "
               f"{extracted.seconds:6.2f}s  {state}")
+
+    try:
+        changed = normalize_direction(global_graph_path())
+    except FileNotFoundError as exc:
+        print(f"no global graph to normalise: {exc}", file=sys.stderr)
+    else:
+        print(f"normalised direction on {changed} edges")
 
     try:
         graph = load_global_graph()

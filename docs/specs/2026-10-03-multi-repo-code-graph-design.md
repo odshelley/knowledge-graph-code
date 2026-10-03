@@ -100,7 +100,10 @@ also removes the single-JSON-file size ceiling for breadth queries.
 
 ### 1. `repos.yaml`
 
-The only file that decides what is in scope. One entry per repository:
+The only file that decides what is in scope. One entry per repository.
+
+First-run set, decided 2026-10-03 — five repos giving both cross-repo and
+cross-language signal:
 
 ```yaml
 repos:
@@ -110,7 +113,20 @@ repos:
   - path: ~/Projects/graphify
     tag: graphify
     enabled: true
+  - path: ~/Projects/neural_particle_method
+    tag: neural-particle-method
+    enabled: true
+  - path: ~/Projects/diffusion-bridge
+    tag: diffusion-bridge
+    enabled: true
+  - path: ~/Projects/claude
+    tag: claude
+    enabled: true
 ```
+
+`claude` is TypeScript-dominant and the other four are Python, so the set
+exercises multi-language extraction as well as cross-repo linking. Querying
+`graphify` through a graph built by graphify is a deliberate self-test.
 
 Adding a repo is a one-line edit. `tag` is the namespace for that repo's nodes
 and the key the Neo4j reaper scopes on, so tags must be stable — renaming a tag
@@ -259,10 +275,7 @@ The POC should demonstrate it knows where it is blind.
 
 ## Open questions
 
-1. Which repos go in `repos.yaml` for the first run? Proposal: the Python-heavy
-   set (`knowledge-retrieval`, `graphify`, `neural_particle_method`,
-   `aris-research-skills`, `diffusion-bridge`) plus `claude` for TypeScript
-   coverage, giving cross-language and cross-repo signal.
-2. Does the Neo4j path earn its place in the POC at all, or would graphify's
+1. Does the Neo4j path earn its place in the POC at all, or would graphify's
    stdio MCP alone answer every question? Worth measuring, since a negative
-   result simplifies the work build considerably.
+   result simplifies the work build considerably. Neo4j stays in scope for the
+   POC precisely so this can be answered with evidence.

@@ -59,21 +59,33 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"  {repo.tag:26s} {extracted.nodes:6d}n {extracted.edges:6d}e "
               f"{extracted.seconds:6.2f}s  {state}")
 
-    graph = load_global_graph()
-    print(f"\nglobal graph: {graph.number_of_nodes()} nodes, "
-          f"{graph.number_of_edges()} edges")
+    try:
+        graph = load_global_graph()
+    except FileNotFoundError as exc:
+        print(f"\nno global graph to summarise: {exc}", file=sys.stderr)
+    else:
+        print(f"\nglobal graph: {graph.number_of_nodes()} nodes, "
+              f"{graph.number_of_edges()} edges")
     if failures:
         print(f"failed repos: {', '.join(failures)}", file=sys.stderr)
     return 1 if failures else 0
 
 
 def _cmd_push(args: argparse.Namespace) -> int:
+    # load_global_graph() is checked before importing push_global_graph (Task
+    # 5's not-yet-written function) so a missing global graph is reported
+    # cleanly even before Task 5 exists, instead of an unrelated ImportError.
+    try:
+        graph = load_global_graph()
+    except FileNotFoundError as exc:
+        print(f"no global graph to push: {exc}", file=sys.stderr)
+        return 1
+
     from kgc.neo4j_io import push_global_graph
 
     settings = load_settings(ENV_PATH)
     repos = load_repos(REPOS_PATH)
     tags = set(args.repo) if args.repo else {r.tag for r in repos}
-    graph = load_global_graph()
     summary = push_global_graph(graph, settings, tags, dry_run=args.dry_run)
     for line in summary:
         print(line)

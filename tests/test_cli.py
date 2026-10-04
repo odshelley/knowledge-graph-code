@@ -183,6 +183,36 @@ def test_init_refuses_a_broken_env_without_writing_anything(tmp_path, monkeypatc
     assert "s3cret" not in err
 
 
+def test_init_reports_an_unwritable_out_path_without_a_traceback(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    _repos(tmp_path, monkeypatch)
+    out = tmp_path / "missing-dir" / ".mcp.json"   # parent does not exist
+
+    assert main(["init", "--env", str(env), "--out", str(out)]) == 1
+
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "init failed:" in err
+    assert "s3cret" not in err
+
+
+def test_init_reports_a_bad_claude_md_path_without_a_traceback(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    _repos(tmp_path, monkeypatch)
+    out = tmp_path / ".mcp.json"
+    bad_claude_md = tmp_path / "missing-dir" / "CLAUDE.md"   # parent does not exist
+
+    assert main(["init", "--env", str(env), "--out", str(out),
+                 "--claude-md", str(bad_claude_md)]) == 1
+
+    # init writes the .mcp.json before appending to CLAUDE.md, so a bad
+    # --claude-md path still leaves a valid .mcp.json behind.
+    assert out.exists()
+    err = capsys.readouterr().err
+    assert "init failed:" in err
+    assert "s3cret" not in err
+
+
 def test_serve_loads_settings_and_hands_off_to_the_server(tmp_path, monkeypatch):
     env = _env(tmp_path)
     recorded = {}

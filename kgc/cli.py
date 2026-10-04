@@ -150,13 +150,21 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 1
 
     out = Path(args.out)
-    write_private(out, json.dumps(build_mcp_config(env_path, Path(sys.executable)), indent=2) + "\n")
+    try:
+        write_private(out, json.dumps(build_mcp_config(env_path, Path(sys.executable)), indent=2) + "\n")
+    except OSError as exc:
+        print(f"init failed: {exc}", file=sys.stderr)
+        return 1
     print(f"wrote {out} (mode 600; credentials stay in {env_path})")
 
     block = render_claude_md([r.tag for r in repos])
     if args.claude_md:
         target = Path(args.claude_md)
-        changed = append_claude_md(target, block)
+        try:
+            changed = append_claude_md(target, block)
+        except OSError as exc:
+            print(f"init failed: {exc}", file=sys.stderr)
+            return 1
         print(f"{'appended kgc block to' if changed else 'kgc block already present in'} {target}")
     else:
         print("\nAdd this to your CLAUDE.md:\n")

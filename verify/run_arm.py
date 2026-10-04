@@ -82,7 +82,7 @@ REPOS_YAML = PROJECT_ROOT / "repos.yaml"
 CSV_HEADER = [
     "question", "arm", "run", "model", "input_tokens", "output_tokens",
     "cache_read_tokens", "total_cost_usd", "duration_ms", "num_turns",
-    "graphify_calls", "neo4j_calls", "answer_file",
+    "malformed_lines", "graphify_calls", "neo4j_calls", "answer_file",
 ]
 
 # One line per question in questions.md: "N. **class** [repo] text".
@@ -290,6 +290,26 @@ class RunFailed(RuntimeError):
 _STDERR_TAIL_CHARS = 2000
 
 
+def _stderr_tail(raw: str | bytes | None) -> str:
+    """Normalise then truncate a captured stderr blob for an error record.
+
+    CPython's `subprocess.TimeoutExpired.stderr` is **bytes** even with
+    `text=True`, if the child had written to stderr before being killed
+    (reproduced directly against this repo's Python 3.13:
+    `subprocess.run([...], capture_output=True, text=True, timeout=0.3)` on
+    a process that writes to stderr then sleeps past the timeout). Returning
+    anything but `str` here means `RunFailed.stderr_tail` can carry bytes,
+    which `json.dumps` in `main`'s error handler cannot serialise - an error
+    handler that can itself raise, aborting the whole batch. Normalise here,
+    at the source, so every caller gets `str` unconditionally.
+    """
+    if not raw:
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    return raw[-_STDERR_TAIL_CHARS:]
+
+
 def _execute(inv: Invocation, *, timeout: float) -> str:
     try:
         proc = subprocess.run(
@@ -297,12 +317,13 @@ def _execute(inv: Invocation, *, timeout: float) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        tail = (exc.stderr or "")[-_STDERR_TAIL_CHARS:] if exc.stderr else ""
-        raise RunFailed(f"claude timed out after {timeout}s", stderr_tail=tail) from exc
+        raise RunFailed(
+            f"claude timed out after {timeout}s", stderr_tail=_stderr_tail(exc.stderr),
+        ) from exc
     if proc.returncode != 0 and not proc.stdout.strip():
         raise RunFailed(
             f"claude exited {proc.returncode} with no stdout",
-            stderr_tail=(proc.stderr or "")[-_STDERR_TAIL_CHARS:],
+            stderr_tail=_stderr_tail(proc.stderr),
         )
     return proc.stdout
 
@@ -334,6 +355,7 @@ def _run_one(
                 "run": run,
                 "model": model,
                 "answer": parsed["answer"],
+                "malformed_lines": parsed["malformed_lines"],
                 "result_event": parsed["raw_result_event"],
             },
             indent=2,
@@ -352,6 +374,7 @@ def _run_one(
         "total_cost_usd": parsed["total_cost_usd"],
         "duration_ms": parsed["duration_ms"],
         "num_turns": parsed["num_turns"],
+        "malformed_lines": parsed["malformed_lines"],
         "graphify_calls": parsed["graphify_calls"],
         "neo4j_calls": parsed["neo4j_calls"],
         "answer_file": str(answer_file.relative_to(PROJECT_ROOT)),
@@ -453,21 +476,33 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 except Exception as exc:  # noqa: BLE001 - one bad run must not abort the batch
                     failed_labels.append(label)
-                    RUNS_DIR.mkdir(parents=True, exist_ok=True)
-                    error_path = RUNS_DIR / f"{label}.error.json"
-                    error_path.write_text(
-                        json.dumps(
-                            {
-                                "run_label": label,
-                                "exception_type": type(exc).__name__,
-                                "exception_message": str(exc),
-                                "stderr_tail": getattr(exc, "stderr_tail", ""),
-                            },
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
                     print(f"  FAILED {label}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                    # The error handler itself must never be able to raise -
+                    # that would abort the batch on the very path meant to
+                    # keep one bad run from doing exactly that. `default=str`
+                    # means no field's type can blow up json.dumps (e.g. a
+                    # stray non-str stderr_tail from an exception this script
+                    # didn't raise itself), and the write is its own
+                    # try/except so even a disk/permissions error here just
+                    # gets logged, never propagated.
+                    record = {
+                        "run_label": label,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "stderr_tail": getattr(exc, "stderr_tail", ""),
+                    }
+                    try:
+                        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+                        error_path = RUNS_DIR / f"{label}.error.json"
+                        error_path.write_text(
+                            json.dumps(record, indent=2, default=str), encoding="utf-8",
+                        )
+                    except Exception as write_exc:  # noqa: BLE001 - see above
+                        print(
+                            f"  (also failed to write error record for {label}: "
+                            f"{type(write_exc).__name__}: {write_exc})", file=sys.stderr,
+                        )
+                        print(f"  {record}", file=sys.stderr)
 
     if failed_labels:
         print(f"{len(failed_labels)} run(s) failed: {', '.join(failed_labels)}", file=sys.stderr)

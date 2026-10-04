@@ -359,8 +359,43 @@ def test_csv_header_matches_the_documented_columns():
     assert CSV_HEADER == [
         "question", "arm", "run", "model", "input_tokens", "output_tokens",
         "cache_read_tokens", "total_cost_usd", "duration_ms", "num_turns",
-        "graphify_calls", "neo4j_calls", "answer_file",
+        "malformed_lines", "graphify_calls", "neo4j_calls", "answer_file",
     ]
+
+
+def test_run_one_persists_malformed_lines_in_json_and_csv(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    results_csv = tmp_path / "results.csv"
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", results_csv)
+    # _run_one records answer_file relative to PROJECT_ROOT; relocate that
+    # too so the tmp_path-based RUNS_DIR is actually underneath it.
+    monkeypatch.setattr("verify.run_arm.PROJECT_ROOT", tmp_path)
+
+    stdout = "\n".join([
+        "not json at all {{{",
+        json.dumps({
+            "type": "result", "is_error": False, "num_turns": 1, "duration_ms": 1,
+            "total_cost_usd": 0.01, "result": "answer", "usage": {},
+        }),
+    ])
+    monkeypatch.setattr("verify.run_arm._execute", lambda inv, *, timeout: stdout)
+
+    from verify.run_arm import _run_one
+
+    q = parse_questions(QUESTIONS_PATH)[0]
+    _run_one(
+        "control", q, 1, model="sonnet", permission_mode="default",
+        allowed_tools=None, repos=repo_path_map(), timeout=10,
+    )
+
+    answer_file = runs_dir / "control-q01-r1.json"
+    data = json.loads(answer_file.read_text())
+    assert data["malformed_lines"] == 1
+
+    with results_csv.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["malformed_lines"] == "1"
 
 
 # --- --dry-run writes nothing ----------------------------------------------
@@ -431,6 +466,12 @@ def test_execute_raises_run_failed_on_timeout(monkeypatch):
     with pytest.raises(RunFailed) as exc_info:
         _execute(inv, timeout=5)
     assert "timed out" in str(exc_info.value)
+    # CPython gives TimeoutExpired.stderr as bytes when text=True and the
+    # child wrote to stderr before the kill (reproduced on this repo's
+    # Python 3.13). RunFailed.stderr_tail must always be str - it is written
+    # straight into an .error.json by main() later.
+    assert isinstance(exc_info.value.stderr_tail, str)
+    assert "stuck" in exc_info.value.stderr_tail
 
 
 def test_execute_raises_run_failed_on_nonzero_exit_with_no_stdout(monkeypatch):
@@ -472,6 +513,38 @@ def test_main_continues_after_one_run_fails_and_exits_nonzero(tmp_path, monkeypa
     data = json.loads(error_file.read_text())
     assert data["run_label"] == "treatment-q01-r1"
     assert data["exception_type"] == "RuntimeError"
+    assert "boom" in data["exception_message"]
+
+
+def test_main_error_handler_survives_a_non_str_stderr_tail(tmp_path, monkeypatch):
+    # The error handler itself must never be able to raise: if some exception
+    # (not necessarily RunFailed's own normalised path) carries a non-str
+    # stderr_tail, json.dumps(..., indent=2) alone raises TypeError inside
+    # the except block, aborting the whole batch - the exact bug this guards.
+    from verify.run_arm import RunFailed
+
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+
+    calls: list[str] = []
+
+    def fake_run_one(arm, question, run, **kwargs):
+        label = run_label(arm, question, run)
+        calls.append(label)
+        if label == "treatment-q01-r1":
+            raise RunFailed("boom", stderr_tail=b"\xff\xfe raw bytes")
+
+    monkeypatch.setattr("verify.run_arm._run_one", fake_run_one)
+
+    result = main(["--questions", "1", "--runs", "1"])
+
+    assert result == 1
+    assert set(calls) == {"control-q01-r1", "treatment-q01-r1"}
+    error_file = tmp_path / "runs" / "treatment-q01-r1.error.json"
+    assert error_file.exists()
+    data = json.loads(error_file.read_text())  # must not raise
+    assert data["run_label"] == "treatment-q01-r1"
+    assert data["exception_type"] == "RunFailed"
     assert "boom" in data["exception_message"]
 
 

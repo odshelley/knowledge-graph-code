@@ -157,6 +157,15 @@ reading the code. In order:
      An `.error.json` from a previous failed attempt does **not** block a
      retry - only a completed `.json` does, so simply re-running without
      `--force` naturally retries anything that failed last time.
+   - **`malformed_lines`.** Both `verify/runs/<label>.json` and the matching
+     `results.csv` row carry a `malformed_lines` count - how many lines of
+     that run's raw stream-json output failed to parse as JSON and were
+     skipped (truncated output, a stray stderr line that leaked onto
+     stdout, ...). The run still completed as long as a `result` event was
+     found; a nonzero count here is a flag to look at that run's `.json`
+     more carefully, not itself a failure. A run with no `result` event at
+     all is a different thing entirely - that raises and produces an
+     `.error.json` instead, per the isolation note above.
 3. Judge correctness: for every file under `verify/runs/*.json`, read the
    `answer` field against the real code (the file paths named in
    `questions.md` are a starting point, not the full answer) and fill in the

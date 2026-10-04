@@ -4,6 +4,7 @@ import networkx as nx
 
 from kgc.cli import main
 from kgc.config import Repo, Settings
+from kgc.direction import Reorientation
 
 
 def test_build_reports_cleanly_when_no_global_graph_exists(monkeypatch, tmp_path, capsys):
@@ -30,24 +31,32 @@ def test_build_reports_cleanly_when_no_global_graph_exists(monkeypatch, tmp_path
     assert "no global graph" in captured.err
 
 
-def test_build_normalises_global_graph_once(monkeypatch, capsys):
+def test_build_normalises_then_retags_the_global_graph_once(monkeypatch, capsys):
     monkeypatch.setattr("kgc.cli.load_repos", lambda path: [])
 
     calls = []
 
     def fake_normalize_direction(path):
-        calls.append(path)
-        return 3, 2
+        calls.append(("normalize", path))
+        return Reorientation(changed=3, skipped=2, repaired=4)
+
+    def fake_retag_shared_stubs(path):
+        calls.append(("retag", path))
+        return 5
 
     monkeypatch.setattr("kgc.cli.normalize_direction", fake_normalize_direction)
+    monkeypatch.setattr("kgc.cli.retag_shared_stubs", fake_retag_shared_stubs)
     monkeypatch.setattr("kgc.cli.load_global_graph", lambda: nx.Graph())
 
     result = main(["build"])
 
     assert result == 0
-    assert len(calls) == 1
-    captured = capsys.readouterr()
-    assert "normalised direction on 3 edges (2 skipped: stale markers)" in captured.out
+    # direction first (it only touches links), then the stub re-tag (nodes)
+    assert [name for name, _ in calls] == ["normalize", "retag"]
+    assert calls[0][1] == calls[1][1]
+    out = capsys.readouterr().out
+    assert "normalised direction on 3 edges (4 stale markers repaired, 2 skipped)" in out
+    assert "re-tagged 5 shared stubs as external" in out
 
 
 def test_push_returns_1_when_no_global_graph_exists(monkeypatch, tmp_path):

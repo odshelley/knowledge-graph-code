@@ -183,3 +183,60 @@ def test_push_scrubs_password_from_driver_errors():
     assert "secret" not in str(ei.value)
     assert "***" in str(ei.value)
     assert ei.value.__cause__ is None
+
+
+def test_reaps_match_on_the_codenode_label():
+    # An unlabelled MATCH (n) cannot use the :CodeNode(repo) index the push
+    # creates; both reaps must be label-scoped.
+    assert "MATCH (n:CodeNode)" in REAP_REPO
+    assert "MATCH (n:CodeNode)" in REAP_ORPHAN_EXTERNALS
+
+
+def _node_rows(driver):
+    return [row for q, p in driver.session_obj.calls
+            if "MERGE (n:CodeNode" in q for row in p["rows"]]
+
+
+def test_push_strips_private_node_props_but_keeps_public_ones():
+    # Edge props already drop _-prefixed keys; node props must do the same
+    # (_origin/_callable are graphify internals, ~65k values across the real
+    # graph) while keeping everything Cypher users and the reaper rely on.
+    g = _graph()
+    g.nodes["alpha::mod_f"].update(_origin="ast", _callable=True,
+                                   local_id="mod_f", source_file="mod.py")
+    driver = _RecordingDriver()
+    push_global_graph(g, SETTINGS, {"alpha"}, driver=driver)
+    (row,) = [r for r in _node_rows(driver) if r["id"] == "alpha::mod_f"]
+    assert not any(k.startswith("_") for k in row["props"])
+    assert row["props"]["repo"] == "alpha"
+    assert row["props"]["local_id"] == "mod_f"
+    assert row["props"]["source_file"] == "mod.py"
+    assert row["props"]["label"] == "f"
+    assert row["props"]["file_type"] == "code"
+    (ext,) = [r for r in _node_rows(driver) if r["id"] == "numpy"]
+    assert ext["props"]["external"] is True
+
+
+def test_partial_push_includes_edges_with_one_endpoint_outside_the_pushed_set():
+    # Pushing only alpha must still write the beta->alpha call. If beta's node
+    # is absent the MATCH is a harmless no-op; when beta is pushed later the
+    # same row lands, so repeated partial pushes converge on the full graph.
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver)
+    calls_rows = [row for q, p in _edge_statements(driver)
+                  if "calls" in q.lower() for row in p["rows"]]
+    (row,) = calls_rows
+    assert (row["source"], row["target"]) == ("beta::mod_g", "alpha::mod_f")
+
+
+def test_push_falls_back_to_raw_order_when_markers_do_not_name_the_endpoints():
+    # The fallback is atomic: a half-stale marker pair never yields a
+    # self-loop or an endpoint that is not on the edge.
+    g = _graph()
+    g.edges["alpha::mod_f", "beta::mod_g"].update(_src="ghost", _tgt="alpha::mod_f")
+    driver = _RecordingDriver()
+    push_global_graph(g, SETTINGS, {"alpha", "beta"}, driver=driver)
+    calls_rows = [row for q, p in _edge_statements(driver)
+                  if "calls" in q.lower() for row in p["rows"]]
+    (row,) = calls_rows
+    assert {row["source"], row["target"]} == {"alpha::mod_f", "beta::mod_g"}

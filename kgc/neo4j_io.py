@@ -111,9 +111,10 @@ AURA_FREE_REL_LIMIT = 175_000
 # The only destructive queries in the project. Both are deliberately narrow.
 # REAP_REPO is scoped on the 'repo' property that graphify's
 # prefix_graph_for_global sets on every repo-local node and on no external
-# node, so a tag matching nothing deletes nothing.
+# node, so a tag matching nothing deletes nothing. Both match on :CodeNode so
+# the :CodeNode(repo) index below is usable; an unlabelled MATCH (n) is not.
 REAP_REPO = """
-MATCH (n) WHERE n.repo = $tag
+MATCH (n:CodeNode) WHERE n.repo = $tag
 DETACH DELETE n
 """
 
@@ -121,7 +122,7 @@ DETACH DELETE n
 # 'repo' property, so REAP_REPO never touches them. They orphan when the last
 # repo referencing them goes away; this sweeps those and only those.
 REAP_ORPHAN_EXTERNALS = """
-MATCH (n) WHERE n.external = true AND NOT (n)--()
+MATCH (n:CodeNode) WHERE n.external = true AND NOT (n)--()
 DELETE n
 """
 
@@ -241,10 +242,13 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
 
             # The requested repos' nodes, plus every external stub: externals
             # are shared across repos and MERGE makes re-pushing them idempotent.
+            # _-prefixed props (_origin, _callable, ...) are graphify internals
+            # and are dropped exactly as they are for edges below.
             node_rows = [
                 {
                     "id": nid,
-                    "props": {k: _scalar(v) for k, v in data.items()},
+                    "props": {k: _scalar(v) for k, v in data.items()
+                              if not k.startswith("_")},
                 }
                 for nid, data in graph.nodes(data=True)
                 if data.get("repo") in tags or data.get("external")
@@ -257,12 +261,19 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
             # Group edges by relationship type. build_from_json(directed=False)
             # yields (u, v) in arbitrary order; graphify keeps the true direction
             # in _src/_tgt, which is what "what calls X" in Cypher depends on.
+            # An edge is written when AT LEAST ONE endpoint is in this push: if
+            # the other endpoint is not in the database yet the MATCH is a
+            # harmless no-op, and when that repo is pushed later the same row
+            # lands, so partial pushes converge on the full edge set.
             by_rel: dict[str, list[dict]] = {}
             for u, v, data in graph.edges(data=True):
-                if u not in ids or v not in ids:
-                    continue  # the other endpoint belongs to a repo not in this push
-                source, target = data.get("_src", u), data.get("_tgt", v)
-                if source not in ids or target not in ids:
+                if u not in ids and v not in ids:
+                    continue  # neither endpoint belongs to this push
+                source, target = data.get("_src"), data.get("_tgt")
+                if {source, target} != {u, v}:
+                    # Markers absent or stale (not both naming this edge's own
+                    # endpoints): fall back atomically to the raw order rather
+                    # than trusting either marker on its own.
                     source, target = u, v
                 rel = _rel_type(str(data.get("relation") or "RELATED"))
                 by_rel.setdefault(rel, []).append({

@@ -10,33 +10,75 @@ Markers can go stale: global_add's node dedup (e.g. unifying every repo's
 reference to the builtin Exception) rewires an incident edge's source/target
 to the surviving node but does not update that edge's _src/_tgt. Reorienting
 onto a stale marker would materialise a phantom, attribute-less node on the
-next load - so a link is only reoriented when BOTH markers name a real node
-id; otherwise it is left exactly as graphify wrote it and counted skipped.
+next load, so a link is handled by how many of its markers name real nodes:
+
+- both valid: source/target are rewritten from the markers;
+- exactly one valid, and it names one of the link's own endpoints: that
+  endpoint keeps the marker's role (source for _src, target for _tgt), the
+  other endpoint takes the other role, and the stale marker is REPAIRED to
+  that other endpoint. This is the dedup-survivor case - 1,343 links in the
+  five-repo graph, every one with its raw order contradicting the surviving
+  marker - and it leaves the markers self-consistent, so the Neo4j push,
+  which reads them, stores the right direction;
+- otherwise (one valid marker that is not an endpoint, or neither valid):
+  the link is left exactly as graphify wrote it and counted skipped.
+
+Only ids already present as endpoints are ever written into
+source/target/_src/_tgt, so no pass here can introduce a node id that is
+not in the graph.
 
 Imports nothing from kgc, so both kgc/extract.py and kgc/globalgraph.py can
 import this without creating a cycle between them.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 
-def reorient_links(links: list[dict], node_ids: set[str]) -> tuple[int, int]:
-    """Rewrite source/target from _src/_tgt wherever both markers are valid.
 
-    Keeps the markers (the Neo4j push reads them). Returns (changed, skipped):
-    changed is the number of links whose source/target were rewritten,
-    skipped is the number left untouched because a marker was stale.
-    Idempotent - a second call changes nothing.
+@dataclass(frozen=True)
+class Reorientation:
+    """Counts from one reorient_links pass.
+
+    changed:  links whose source/target were rewritten.
+    skipped:  links left untouched because their markers could not be trusted.
+    repaired: links whose stale marker was rewritten to a real endpoint. Such a
+              link is also counted in `changed` if its raw order had to move.
     """
-    changed = skipped = 0
+    changed: int = 0
+    skipped: int = 0
+    repaired: int = 0
+
+
+def reorient_links(links: list[dict], node_ids: set[str]) -> Reorientation:
+    """Rewrite source/target (and repair a lone stale marker) in place.
+
+    Keeps the markers (the Neo4j push reads them). Idempotent - a second call
+    changes nothing.
+    """
+    changed = skipped = repaired = 0
     for link in links:
         src, tgt = link.get("_src"), link.get("_tgt")
         if src is None or tgt is None:
             continue
-        if src not in node_ids or tgt not in node_ids:
-            skipped += 1
-            continue
-        if (link.get("source"), link.get("target")) != (src, tgt):
-            link["source"] = src
-            link["target"] = tgt
+        src_ok, tgt_ok = src in node_ids, tgt in node_ids
+        if src_ok and tgt_ok:
+            want_src, want_tgt = src, tgt
+        else:
+            endpoints = (link.get("source"), link.get("target"))
+            if src_ok and src in endpoints:
+                other = endpoints[1] if endpoints[0] == src else endpoints[0]
+                want_src, want_tgt = src, other
+                link["_tgt"] = other
+            elif tgt_ok and tgt in endpoints:
+                other = endpoints[1] if endpoints[0] == tgt else endpoints[0]
+                want_src, want_tgt = other, tgt
+                link["_src"] = other
+            else:
+                skipped += 1
+                continue
+            repaired += 1
+        if (link.get("source"), link.get("target")) != (want_src, want_tgt):
+            link["source"] = want_src
+            link["target"] = want_tgt
             changed += 1
-    return changed, skipped
+    return Reorientation(changed=changed, skipped=skipped, repaired=repaired)

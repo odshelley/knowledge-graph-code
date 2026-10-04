@@ -19,6 +19,7 @@ from kgc.globalgraph import (
     merge_repo,
     normalize_direction,
     registered_repos,
+    retag_shared_stubs,
 )
 
 ENV_PATH = Path(".env")
@@ -65,13 +66,19 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"  {repo.tag:26s} {extracted.nodes:6d}n {extracted.edges:6d}e "
               f"{extracted.seconds:6.2f}s  {state}")
 
+    # Two post-merge passes graphify does not do (see kgc.globalgraph):
+    # direction first (links only), then re-tag dedup survivors that several
+    # repos reference as shared external stubs (nodes only).
     try:
-        changed, skipped = normalize_direction(global_graph_path())
+        oriented = normalize_direction(global_graph_path())
     except FileNotFoundError as exc:
         print(f"no global graph to normalise: {exc}", file=sys.stderr)
     else:
-        print(f"normalised direction on {changed} edges "
-              f"({skipped} skipped: stale markers)")
+        print(f"normalised direction on {oriented.changed} edges "
+              f"({oriented.repaired} stale markers repaired, "
+              f"{oriented.skipped} skipped)")
+        retagged = retag_shared_stubs(global_graph_path())
+        print(f"re-tagged {retagged} shared stubs as external")
 
     try:
         graph = load_global_graph()

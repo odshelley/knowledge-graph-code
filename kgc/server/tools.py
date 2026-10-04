@@ -53,8 +53,9 @@ DESCRIPTIONS = {
                 "the chain (max 4). Use for 'what does X actually invoke'."),
     "impact": ("Transitive dependents of one or more symbols and/or changed files, grouped by repo "
                "with counts and samples. Feed a git diff's file list straight in. depth max 4."),
-    "externals": ("Third-party packages each repo imports. min_repos=2 or more returns only packages "
-                  "shared by that many repos, with the repo list."),
+    "externals": ("Imported external names (third-party packages, stdlib and unresolved imports "
+                  "mixed). min_repos=2 or more returns only names shared by that many repos, "
+                  "with the repo list."),
     "cross_repo": ("Real coupling between two repos' own code: edges whose both ends are sourced "
                    "nodes in different repos, grouped by relationship type with samples. "
                    "Returns 'none' when there is none."),

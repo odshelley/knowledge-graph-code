@@ -186,9 +186,10 @@ queries before sending when, after removing single- and double-quoted string
 literals, they match
 `\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD CSV|CALL\s*\{)\b`
 (case-insensitive). Removing literals first means `WHERE n.label = 'set'` is
-not refused. Escaped quotes inside literals are not handled and can cause a
-false refusal; that is documented, and the agent's recourse is the specific
-tools. Transaction timeout 10 s on every call. `depth` is capped at 4 on
+not refused, and backslash-escaped quotes inside literals are handled. The one
+deliberate false positive is a read-only `CALL { }` subquery, refused because
+a subquery can contain a write; the agent's recourse is the specific tools.
+Transaction timeout 10 s on every call. `depth` is capped at 4 on
 `callers`, `callees` and `impact`.
 
 ### Runtime
@@ -391,9 +392,8 @@ it does.
   stable.
 - `cypher` guard: every keyword in the regex refused, in any case; a query
   whose only occurrence of a keyword is inside a quoted string literal is
-  **not** refused; a literal containing an escaped quote followed by a keyword
-  is refused (the documented false positive, asserted so a later fix is
-  deliberate).
+  **not** refused, including literals with backslash-escaped quotes; a
+  read-only `CALL { }` subquery is refused (the documented false positive).
 - `kgc init`: file mode 0600; no credential strings in the written JSON.
 - Startup description rendering: with and without a reachable driver.
 
@@ -444,7 +444,7 @@ CodeCompass failure mode: agents that never reach for the tool).
 | Full-text relevance worse than graphify's tuned in-memory search | Measured directly by the `kgc` arm against the treatment arm |
 | Grammar wheel pins (`tree-sitter<0.26`) absent from the bank's internal index | Dependency list is explicit and short; mirror once |
 | Startup description rendering needs the database | 3 s timeout, generic fallback |
-| `cypher` guard false positive on escaped quotes inside literals | Documented; agent can use the specific tools |
+| `cypher` guard refuses read-only `CALL { }` subqueries | Documented; agent can use the specific tools |
 
 ## Appendix — module map, first POC → this design
 

@@ -16,8 +16,10 @@ __pycache__/
 .mcp.json
 
 # Per-arm MCP configs for the harness: treatment's carries the password,
-# kgc's carries machine-specific absolute paths.
-verify/*-mcp.json
+# kgc's carries machine-specific absolute paths. Named explicitly, not by
+# glob, so verify/empty-mcp.json (tracked, carries neither) stays tracked.
+verify/treatment-mcp.json
+verify/kgc-mcp.json
 
 # Task 7 verification harness: raw per-run data the human produces by
 # actually running verify/run_arm.py. The harness itself (questions.md,

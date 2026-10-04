@@ -89,6 +89,22 @@ def test_unsearchable_symbol_skips_the_fulltext_call():
     assert q.SEARCH not in db.queries()
 
 
+def test_two_externals_sharing_a_label_are_ambiguous():
+    rows = [node_row("numpy", "numpy", repo=None, source_file="", external=True),
+            node_row("ext.numpy", "numpy", repo=None, source_file="", external=True)]
+    db = FakeBackend([(q.EXACT_LABEL, rows)])
+    res = resolve(db, "numpy")
+    assert not res.ok and res.node is None
+    assert [c.id for c in res.candidates] == ["numpy", "ext.numpy"]
+
+
+def test_a_single_external_resolves():
+    rows = [node_row("numpy", "numpy", repo=None, source_file="", external=True)]
+    db = FakeBackend([(q.EXACT_LABEL, rows)])
+    res = resolve(db, "numpy")
+    assert res.ok and res.node.id == "numpy" and res.node.external is True
+
+
 def test_node_round_trips_through_as_row():
     row = node_row("a::f", "f()", community=3)
     assert Node.from_row(row).as_row() == row

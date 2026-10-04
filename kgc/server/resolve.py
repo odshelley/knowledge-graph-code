@@ -5,7 +5,7 @@ Tiers, first non-empty wins (adapted from graphify's _find_node_tiers):
   exact label (with or without the trailing `()` callables carry)
   case-insensitive label
   full-text, accepted only with a clear winner (top score >= 2x the runner-up)
-More than one hit across different files is ambiguity, reported as candidates
+More than one hit across different files — or across different external nodes — is ambiguity, reported as candidates
 - one per file - never a guess. Several hits in one file are ordinary
 precedence (a file node plus its members): the first wins.
 """
@@ -59,7 +59,7 @@ def _decide(rows: list[dict]) -> Resolution:
     nodes = [Node.from_row(r) for r in rows]
     per_file: dict[str, Node] = {}
     for node in nodes:
-        per_file.setdefault(node.source_file or "", node)
+        per_file.setdefault(node.source_file or node.id, node)
     if len(per_file) > 1:
         return Resolution(candidates=tuple(per_file.values()))
     return Resolution(node=nodes[0])

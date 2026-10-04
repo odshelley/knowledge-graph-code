@@ -1,6 +1,6 @@
 import pytest
 from kgc.config import Settings
-from kgc.graph.neo4j_io import doctor, DoctorReport, resolve_database
+from kgc.graph.neo4j_io import connect, doctor, DoctorReport, resolve_database
 
 
 class _FakeResult:
@@ -53,6 +53,23 @@ SETTINGS = Settings(
     neo4j_password="secret",
     neo4j_database="abc",
 )
+
+
+def test_connect_sets_a_ten_second_connection_timeout(monkeypatch):
+    captured = {}
+
+    def fake_driver(uri, auth=None, **kwargs):
+        captured["uri"] = uri
+        captured["auth"] = auth
+        captured["kwargs"] = kwargs
+        return "driver"
+
+    monkeypatch.setattr("kgc.graph.neo4j_io.GraphDatabase.driver", fake_driver)
+
+    assert connect(SETTINGS) == "driver"
+    assert captured["uri"] == SETTINGS.neo4j_uri
+    assert captured["auth"] == (SETTINGS.neo4j_username, SETTINGS.neo4j_password)
+    assert captured["kwargs"]["connection_timeout"] == 10.0
 
 
 def test_resolve_database_prefers_configured_name():

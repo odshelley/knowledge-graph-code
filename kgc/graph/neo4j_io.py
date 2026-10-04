@@ -44,6 +44,7 @@ def connect(settings: Settings):
     return GraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_username, settings.neo4j_password),
+        connection_timeout=10.0,
     )
 
 

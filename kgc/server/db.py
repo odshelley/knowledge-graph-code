@@ -7,6 +7,7 @@ the driver.
 """
 from __future__ import annotations
 
+import threading
 from urllib.parse import urlparse
 
 from neo4j import unit_of_work
@@ -39,6 +40,7 @@ class Backend:
         self._resolve = resolve_fn
         self._driver = None
         self._database: str | None = None
+        self._lock = threading.Lock()
 
     @property
     def host(self) -> str:
@@ -47,26 +49,29 @@ class Backend:
     def _unreachable(self) -> KgcError:
         return KgcError(f"cannot reach Neo4j at {self.host}; is the instance paused?")
 
-    def _ensure(self) -> None:
-        if self._driver is not None:
-            return
-        try:
-            driver = self._connect(self._settings)
-        except Exception:  # noqa: BLE001 - every connect failure is "unreachable" to the agent
-            raise self._unreachable() from None
-        try:
-            database = self._resolve(driver, self._settings.neo4j_database)
-        except Exception:  # noqa: BLE001 - resolve failure is also "unreachable" to the agent
+    def _ensure(self):
+        with self._lock:
+            if self._driver is not None:
+                return self._driver, self._database
             try:
-                driver.close()
-            except Exception:  # noqa: BLE001 - closing a fresh driver may still fail
-                pass
-            raise self._unreachable() from None
-        self._driver = driver
-        self._database = database
+                driver = self._connect(self._settings)
+            except Exception:  # noqa: BLE001 - every connect failure is "unreachable" to the agent
+                raise self._unreachable() from None
+            try:
+                database = self._resolve(driver, self._settings.neo4j_database)
+            except Exception:  # noqa: BLE001 - resolve failure is also "unreachable" to the agent
+                try:
+                    driver.close()
+                except Exception:  # noqa: BLE001 - closing a fresh driver may still fail
+                    pass
+                raise self._unreachable() from None
+            self._driver = driver
+            self._database = database
+            return driver, database
 
     def _reset(self) -> None:
-        driver, self._driver, self._database = self._driver, None, None
+        with self._lock:
+            driver, self._driver, self._database = self._driver, None, None
         if driver is not None:
             try:
                 driver.close()
@@ -74,9 +79,9 @@ class Backend:
                 pass
 
     def read(self, query: str, **params) -> list[dict]:
-        self._ensure()
+        driver, database = self._ensure()
         try:
-            with self._driver.session(database=self._database) as session:
+            with driver.session(database=database) as session:
                 return session.execute_read(_read, query, params)
         except (ServiceUnavailable, SessionExpired):
             self._reset()

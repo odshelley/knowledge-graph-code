@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from neo4j.exceptions import ClientError, ServiceUnavailable
 
@@ -81,6 +84,32 @@ def test_backend_connects_lazily_and_only_once():
     assert backend.read("RETURN 1 AS a") == [{"a": 1}]
     assert len(calls) == 1
     assert driver.database == "neo4j"
+
+
+def test_concurrent_first_reads_connect_exactly_once():
+    calls = []
+    lock = threading.Lock()
+
+    def connect_fn(settings):
+        with lock:
+            calls.append(settings)
+        time.sleep(0.05)
+        return _Driver(rows=[{"a": 1}])
+
+    backend = Backend(SETTINGS, connect_fn=connect_fn, resolve_fn=lambda d, name: "neo4j")
+    results: list[list[dict]] = [None] * 8
+
+    def worker(i):
+        results[i] = backend.read("RETURN 1 AS a")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(calls) == 1
+    assert results == [[{"a": 1}]] * 8
 
 
 def test_read_passes_query_and_params_into_the_read_transaction():

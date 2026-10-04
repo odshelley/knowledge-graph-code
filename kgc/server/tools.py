@@ -173,7 +173,7 @@ def impact(db, symbols: list[str] | None = None, files: list[str] | None = None,
             problems.append(_unresolved(symbol, res))
     files = [f.strip() for f in (files or []) if f and f.strip()]
     if not ids and not files:
-        return "\n".join(problems) or "give at least one symbol or file"
+        return cut_to_budget(problems, max_tokens) if problems else "give at least one symbol or file"
     rows = db.read(q.impact(depth), ids=ids, files=files)
     lines = list(problems)
     if not rows:

@@ -223,6 +223,13 @@ def test_impact_with_nothing_to_look_up():
     assert tools.impact(FakeBackend()) == "give at least one symbol or file"
 
 
+def test_impact_with_only_unresolved_symbols_honours_max_tokens():
+    symbols = [f"ghost{i}" for i in range(40)]
+    out = tools.impact(FakeBackend(), symbols=symbols, max_tokens=20)
+    assert out.startswith("[truncated: showing ")
+    assert out.endswith("… truncated; narrow by repo or reduce depth")
+
+
 # --- externals / cross_repo ------------------------------------------------------
 
 def test_externals_lists_packages_with_their_repos():

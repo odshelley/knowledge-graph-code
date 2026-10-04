@@ -228,3 +228,12 @@ def test_serve_loads_settings_and_hands_off_to_the_server(tmp_path, monkeypatch)
 
     assert main(["serve", "--env", str(env), "--http", "8765"]) == 0
     assert recorded["http_port"] == 8765
+
+
+def test_serve_refuses_cleanly_when_env_is_missing(tmp_path, capsys):
+    missing = tmp_path / "missing.env"
+
+    assert main(["serve", "--env", str(missing)]) == 1
+
+    err = capsys.readouterr().err
+    assert "serve refused:" in err

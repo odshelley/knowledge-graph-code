@@ -132,7 +132,11 @@ def _cmd_status(_args: argparse.Namespace) -> int:
 def _cmd_serve(args: argparse.Namespace) -> int:
     from kgc.server.app import serve
 
-    settings = load_settings(Path(args.env))
+    try:
+        settings = load_settings(Path(args.env))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"serve refused: {exc}", file=sys.stderr)
+        return 1
     serve(settings, http_port=args.http)
     return 0
 

@@ -15,8 +15,10 @@ NODE_RETURN = (
 )
 
 DEPENDENCY_RELS = ("calls", "indirect_call", "imports", "imports_from",
-                   "references", "uses", "inherits")
-CALLEE_RELS = ("calls", "indirect_call", "imports", "imports_from", "references", "uses")
+                   "references", "uses", "inherits", "extends", "implements",
+                   "re_exports", "dynamic_import")
+CALLEE_RELS = ("calls", "indirect_call", "imports", "imports_from", "references", "uses",
+              "re_exports", "dynamic_import")
 MAX_DEPTH = 4
 DEFAULT_LIMIT = 50
 

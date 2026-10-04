@@ -5,8 +5,10 @@ from kgc.server import queries as q
 
 def test_whitelists_and_caps():
     assert q.DEPENDENCY_RELS == ("calls", "indirect_call", "imports", "imports_from",
-                                 "references", "uses", "inherits")
-    assert q.CALLEE_RELS == ("calls", "indirect_call", "imports", "imports_from", "references", "uses")
+                                 "references", "uses", "inherits", "extends", "implements",
+                                 "re_exports", "dynamic_import")
+    assert q.CALLEE_RELS == ("calls", "indirect_call", "imports", "imports_from", "references",
+                             "uses", "re_exports", "dynamic_import")
     assert q.MAX_DEPTH == 4 and q.DEFAULT_LIMIT == 50
     assert q.clamp_depth(9) == 4 and q.clamp_depth(0) == 1 and q.clamp_depth(2) == 2
 
@@ -19,7 +21,8 @@ def test_rel_pattern_only_interpolates_whitelisted_types():
 
 def test_neighbours_in_points_at_the_target_and_clamps_depth():
     text = q.neighbours("in", q.DEPENDENCY_RELS, 9)
-    assert "(s:CodeNode)-[:calls|indirect_call|imports|imports_from|references|uses|inherits*1..4]->(t:CodeNode {id: $id})" in text
+    assert ("(s:CodeNode)-[:calls|indirect_call|imports|imports_from|references|uses|inherits"
+           "|extends|implements|re_exports|dynamic_import*1..4]->(t:CodeNode {id: $id})") in text
     assert "s.id <> $id" in text
     assert "$repo IS NULL OR s.repo = $repo" in text
     assert "type(relationships(p)[0]) AS via" in text
@@ -28,8 +31,9 @@ def test_neighbours_in_points_at_the_target_and_clamps_depth():
 
 def test_neighbours_out_starts_at_the_target_and_uses_callee_rels():
     text = q.neighbours("out", q.CALLEE_RELS, 1)
-    assert "(t:CodeNode {id: $id})-[:calls|indirect_call|imports|imports_from|references|uses*1..1]->(s:CodeNode)" in text
-    assert "inherits" not in text
+    assert ("(t:CodeNode {id: $id})-[:calls|indirect_call|imports|imports_from|references|uses"
+           "|re_exports|dynamic_import*1..1]->(s:CodeNode)") in text
+    assert "inherits" not in text and "extends" not in text and "implements" not in text
 
 
 def test_neighbours_rejects_an_unknown_direction():

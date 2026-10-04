@@ -318,7 +318,9 @@ A superset of what is in the database today (40,398 nodes, 122,277 edges at
 ### Relationships
 
 Native types, as today: `calls`, `indirect_call`, `imports`, `imports_from`,
-`contains`, `method`, `inherits`, `references`, `uses`, `rationale_for`.
+`contains`, `method`, `inherits`, `references`, `uses`, `rationale_for`, plus
+`extends`, `implements`, `re_exports` and `dynamic_import` from the
+TypeScript/JVM/.NET extractors.
 Direction convention: caller → callee, importer → imported, container →
 contained, class → method, subclass → superclass, docstring → code. Properties:
 `confidence` (`EXTRACTED` | `INFERRED`), `weight`, `source_file`,

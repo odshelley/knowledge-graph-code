@@ -72,3 +72,23 @@ def test_load_repos_rejects_tag_with_separator(tmp_path):
     y.write_text("repos:\n  - path: ~/a\n    tag: 'bad::tag'\n    enabled: true\n")
     with pytest.raises(ValueError, match="must not contain"):
         load_repos(y)
+
+
+def test_load_repos_names_the_malformed_entry(tmp_path):
+    # A raw KeyError from entry["tag"] says nothing about which of N entries
+    # is broken; the error must name the entry and the missing key.
+    y = tmp_path / "repos.yaml"
+    y.write_text(
+        "repos:\n"
+        "  - path: ~/a\n    tag: ok\n"
+        "  - path: ~/b\n"
+    )
+    with pytest.raises(ValueError, match=r"repos.yaml entry 2 .*'tag'"):
+        load_repos(y)
+
+
+def test_load_repos_rejects_a_non_mapping_entry(tmp_path):
+    y = tmp_path / "repos.yaml"
+    y.write_text("repos:\n  - just-a-string\n")
+    with pytest.raises(ValueError, match=r"repos.yaml entry 1 "):
+        load_repos(y)

@@ -10,16 +10,29 @@ where something lives: use the **graphify** server's `query_graph`, `get_node`,
 
 For cross-repo aggregates, "which repos import X", or impact / reverse-dependency
 questions: use the **neo4j** server's `read_neo4j_cypher` tool (`get_neo4j_schema`
-first to inspect labels/relationship types). Edges point from `_src` to `_tgt`,
-one relationship type per relation (e.g. `calls`, `imports`). Every node has
-label `CodeNode` with properties `id`, `label`, `repo` (absent on shared
-external stubs, which carry `external: true` instead), `source_file`, `community`.
+first to inspect labels/relationship types; these are the tool names of
+`mcp-neo4j-cypher` 0.6.0, which `setup_mcp.py` pins). Relationships run in the
+code's own direction — `(caller)-[:calls]->(callee)`,
+`(module)-[:imports]->(dependency)`, `(subclass)-[:inherits]->(base)` — one
+relationship type per relation. Every node has label `CodeNode` with properties
+`id`, `label`, `repo`, `source_file`, `community`, `local_id`. Shared stubs —
+stdlib / third-party modules, and unresolved names such as `Exception` or `Path`
+that several repos reference — carry `external: true`, no `repo`, and
+`source_file = ''`; they are what lets "which repos depend on X" unify across
+repos. For real cross-repo coupling (edges between two repos' own code) filter
+both ends to sourced nodes: `WHERE a.source_file <> '' AND b.source_file <> ''`.
 
-Example:
+Examples:
 
 ```cypher
 MATCH (n:CodeNode)-[:imports]->(m:CodeNode {label: 'dagster'}) RETURN DISTINCT n.repo
 ```
 
-Only `kgc` writes to Neo4j — the MCP server is read-only. Run `kgc build` to
-refresh the graph.
+```cypher
+MATCH (a:CodeNode)-[r]->(b:CodeNode)
+WHERE a.repo <> b.repo AND a.source_file <> '' AND b.source_file <> ''
+RETURN a.repo, b.repo, type(r), count(*) AS n ORDER BY n DESC
+```
+
+Only `kgc` writes to Neo4j — the MCP server is read-only. Run `kgc build` then
+`kgc push` to refresh the graph.

@@ -20,3 +20,8 @@ __pycache__/
 # results.md, run_arm.py, empty-mcp.json, runs/.gitkeep) stays tracked.
 verify/runs/*.json
 verify/results.csv
+
+# Review working notes, OS and tool litter.
+.superpowers/
+.DS_Store
+.pytest_cache/

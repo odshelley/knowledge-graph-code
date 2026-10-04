@@ -81,7 +81,17 @@ def load_repos(yaml_path: Path) -> list[Repo]:
 
     repos: list[Repo] = []
     seen: set[str] = set()
-    for entry in entries:
+    for index, entry in enumerate(entries, start=1):
+        # Name the broken entry: a raw KeyError says nothing about which of N
+        # entries it was.
+        if not isinstance(entry, dict):
+            raise ValueError(f"{yaml_path.name} entry {index} is not a mapping")
+        missing = [k for k in ("tag", "path") if entry.get(k) in (None, "")]
+        if missing:
+            raise ValueError(
+                f"{yaml_path.name} entry {index} lacks required key(s) "
+                f"{', '.join(repr(k) for k in missing)}"
+            )
         tag = str(entry["tag"])
         if FORBIDDEN_IN_TAG in tag:
             raise ValueError(f"tag {tag!r} must not contain {FORBIDDEN_IN_TAG!r}")

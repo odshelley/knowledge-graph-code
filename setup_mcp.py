@@ -7,6 +7,7 @@ than editing it by hand.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,11 @@ from kgc.config import Settings, load_settings
 from kgc.globalgraph import global_graph_path
 
 OUT_PATH = Path(".mcp.json")
+
+# Pinned: CLAUDE.md names this server's tools (read_neo4j_cypher,
+# get_neo4j_schema) and the flags below were verified against this exact
+# release; @latest could rename either without warning.
+NEO4J_MCP_VERSION = "0.6.0"
 
 
 def build_config(settings: Settings, graph_path: Path, python_path: Path) -> dict:
@@ -28,11 +34,11 @@ def build_config(settings: Settings, graph_path: Path, python_path: Path) -> dic
             # Precise path: read-only Cypher, with the result size capped so a
             # careless MATCH (n) RETURN n cannot blow the token budget. Only
             # kgc writes to this database. Flags verified against
-            # `uvx mcp-neo4j-cypher@latest --help` on 2026-10-03.
+            # `uvx mcp-neo4j-cypher@0.6.0 --help` on 2026-10-03.
             "neo4j": {
                 "command": "uvx",
                 "args": [
-                    "mcp-neo4j-cypher@latest",
+                    f"mcp-neo4j-cypher@{NEO4J_MCP_VERSION}",
                     "--read-only",
                     "--token-limit", "4000",
                     "--db-url", settings.neo4j_uri,
@@ -47,13 +53,28 @@ def build_config(settings: Settings, graph_path: Path, python_path: Path) -> dic
     }
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Create or replace `path` so it is never readable by anyone else, even
+    briefly. write_text-then-chmod leaves a window at the default umask; here
+    the file is created 0600, and an existing (possibly wider) file is
+    truncated and tightened on the same descriptor before anything is written.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def main() -> int:
     settings = load_settings(Path(".env"))
     config = build_config(settings, global_graph_path(), Path(sys.executable))
-    OUT_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    OUT_PATH.chmod(0o600)
+    _write_private(OUT_PATH, json.dumps(config, indent=2))
     print(f"wrote {OUT_PATH} (gitignored, mode 600)")
-    print("servers: graphify (stdio), neo4j (read-only)")
+    print(f"servers: graphify (stdio), neo4j (read-only, mcp-neo4j-cypher@{NEO4J_MCP_VERSION})")
     return 0
 
 

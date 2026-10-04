@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 
 from verify.run_arm import (
+    ARMS,
     CSV_HEADER,
     EMPTY_MCP_PATH,
+    MCP_CONFIG_PATH,
     PREAMBLE_CLASSES,
     PROJECT_ROOT,
     QUESTIONS_PATH,
@@ -167,15 +169,34 @@ def _first_question():
     return parse_questions(QUESTIONS_PATH)[0]
 
 
-def test_treatment_invocation_uses_project_cwd_and_no_mcp_config():
+def test_treatment_invocation_uses_project_cwd_and_only_the_projects_mcp_config():
+    # Without --mcp-config/--strict-mcp-config the treatment arm also loads
+    # every MCP server in the user's global config (a tool-schema token tax,
+    # and untallied servers that could answer the question).
     q = _first_question()
     inv = build_invocation(
         "treatment", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
     )
     assert inv.cwd == PROJECT_ROOT
-    assert "--mcp-config" not in inv.argv
-    assert "--strict-mcp-config" not in inv.argv
+    assert MCP_CONFIG_PATH == PROJECT_ROOT / ".mcp.json"
+    idx = inv.argv.index("--mcp-config")
+    assert inv.argv[idx + 1] == str(MCP_CONFIG_PATH)
+    assert "--strict-mcp-config" in inv.argv
     assert q.text in " ".join(inv.argv)
+
+
+def test_both_arms_disable_user_skills():
+    # The user's global graphify skill says "treat any question as a graphify
+    # query first when graphify-out/ exists" - either arm picking it up would
+    # contaminate the comparison.
+    q = _first_question()
+    for arm in ARMS:
+        inv = build_invocation(
+            arm, q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
+        )
+        idx = inv.argv.index("--disallowedTools")
+        assert inv.argv[idx + 1] == "Skill"
+        assert "--disable-slash-commands" in inv.argv
 
 
 def test_control_invocation_uses_question_repo_cwd_and_empty_mcp_config():
@@ -272,6 +293,10 @@ def test_parse_stream_json_extracts_usage_from_a_minimal_result_event():
     assert parsed["input_tokens"] == 10
     assert parsed["output_tokens"] == 63
     assert parsed["cache_read_tokens"] == 0
+    assert parsed["cache_creation_tokens"] is None
+    assert parsed["context_tokens"] == 10
+    assert parsed["permission_denials"] == 0
+    assert parsed["init"] == {}
     assert parsed["total_cost_usd"] == 0.0516
     assert parsed["duration_ms"] == 1699
     assert parsed["num_turns"] == 1
@@ -346,11 +371,23 @@ def test_parser_handles_the_real_captured_schema_sample():
     assert parsed["num_turns"] == 1
     assert parsed["input_tokens"] == 10
     assert parsed["output_tokens"] == 63
+    # The whole point of the harness: nearly all context arrives as cache
+    # creation/read, not input_tokens (10 of 25,651 here).
+    assert parsed["cache_creation_tokens"] == 25641
     assert parsed["cache_read_tokens"] == 0
+    assert parsed["context_tokens"] == 25651
+    assert parsed["permission_denials"] == 0
+    assert parsed["contamination"] == 0
     assert parsed["duration_ms"] == 1699
     assert parsed["total_cost_usd"] == pytest.approx(0.051607)
     assert parsed["graphify_calls"] == 0
     assert parsed["neo4j_calls"] == 0
+    init = parsed["init"]
+    assert init["cwd"]
+    assert isinstance(init["mcp_servers"], list) and init["mcp_servers"]
+    assert {"name", "status"} <= set(init["mcp_servers"][0])
+    assert isinstance(init["skills"], list)
+    assert "memory_paths" in init
 
 
 # --- CSV header -------------------------------------------------------------
@@ -358,8 +395,10 @@ def test_parser_handles_the_real_captured_schema_sample():
 def test_csv_header_matches_the_documented_columns():
     assert CSV_HEADER == [
         "question", "arm", "run", "model", "input_tokens", "output_tokens",
-        "cache_read_tokens", "total_cost_usd", "duration_ms", "num_turns",
-        "malformed_lines", "graphify_calls", "neo4j_calls", "answer_file",
+        "cache_creation_tokens", "cache_read_tokens", "context_tokens",
+        "total_cost_usd", "duration_ms", "num_turns", "permission_denials",
+        "contamination", "malformed_lines", "graphify_calls", "neo4j_calls",
+        "answer_file",
     ]
 
 
@@ -611,3 +650,152 @@ def test_dry_run_also_reports_skip_for_an_existing_run(tmp_path, monkeypatch, ca
     assert result == 0
     out = capsys.readouterr().out
     assert "skip" in out.lower()
+
+
+# --- isolation and validity signals -----------------------------------------
+
+def _init_line(**fields):
+    base = {"type": "system", "subtype": "init", "cwd": "/x",
+            "mcp_servers": [{"name": "graphify", "status": "connected"},
+                            {"name": "neo4j", "status": "connected"}],
+            "skills": [], "memory_paths": {"auto": "/m"}, "permissionMode": "default"}
+    base.update(fields)
+    return json.dumps(base)
+
+
+def _result_line(**fields):
+    base = {"type": "result", "is_error": False, "num_turns": 1, "duration_ms": 1,
+            "total_cost_usd": 0.01, "result": "answer", "usage": {}}
+    base.update(fields)
+    return json.dumps(base)
+
+
+def _tool_line(*blocks):
+    return json.dumps({"type": "assistant", "message": {"content": list(blocks)}})
+
+
+def test_parse_stream_json_counts_permission_denials_and_contamination():
+    lines = [
+        _init_line(),
+        # a hook event is also type=system; only subtype=init is the init event
+        json.dumps({"type": "system", "subtype": "hook_started", "cwd": "/not-this"}),
+        _tool_line(
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/r/graphify-out/graph.json"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "cat graphify-out/GRAPH_REPORT.md"}},
+            {"type": "tool_use", "name": "Grep", "input": {"pattern": "dagster", "path": "/r/pipeline"}},
+            # an MCP call mentioning the marker is the graph being used, not contamination
+            {"type": "tool_use", "name": "mcp__graphify__query_graph", "input": {"query": "graphify-out"}},
+        ),
+        _result_line(
+            usage={"input_tokens": 5, "cache_creation_input_tokens": 100,
+                   "cache_read_input_tokens": 20, "output_tokens": 7},
+            permission_denials=[{"tool_name": "mcp__neo4j__read_neo4j_cypher"},
+                                {"tool_name": "Bash"}],
+        ),
+    ]
+    parsed = parse_stream_json(lines)
+    assert parsed["permission_denials"] == 2
+    assert parsed["contamination"] == 2
+    assert parsed["graphify_calls"] == 1
+    assert parsed["cache_creation_tokens"] == 100
+    assert parsed["cache_read_tokens"] == 20
+    assert parsed["context_tokens"] == 125
+    assert [s["name"] for s in parsed["init"]["mcp_servers"]] == ["graphify", "neo4j"]
+    assert parsed["init"]["cwd"] == "/x"
+    assert parsed["init"]["memory_paths"] == {"auto": "/m"}
+    assert parsed["init"]["skills"] == []
+
+
+def test_parse_stream_json_context_tokens_is_none_when_usage_is_empty():
+    parsed = parse_stream_json([_result_line()])
+    assert parsed["context_tokens"] is None
+    assert parsed["permission_denials"] == 0
+    assert parsed["contamination"] == 0
+    assert parsed["init"] == {}
+
+
+def test_run_one_persists_isolation_fields_and_clears_a_stale_error_record(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    results_csv = tmp_path / "results.csv"
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", results_csv)
+    monkeypatch.setattr("verify.run_arm.PROJECT_ROOT", tmp_path)
+    # a failed earlier attempt at the same label must not outlive its success
+    stale = runs_dir / "control-q01-r1.error.json"
+    stale.write_text("{}", encoding="utf-8")
+
+    stdout = "\n".join([
+        _init_line(skills=["graphify"]),
+        _tool_line({"type": "tool_use", "name": "Glob", "input": {"pattern": "**/graphify-out/*.json"}}),
+        _result_line(
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 2,
+                   "cache_read_input_tokens": 3, "output_tokens": 4},
+            permission_denials=[{"tool_name": "Bash"}],
+        ),
+    ])
+    monkeypatch.setattr("verify.run_arm._execute", lambda inv, *, timeout: stdout)
+
+    from verify.run_arm import _run_one
+
+    q = parse_questions(QUESTIONS_PATH)[0]
+    _run_one(
+        "control", q, 1, model="sonnet", permission_mode="default",
+        allowed_tools=None, repos=repo_path_map(), timeout=10,
+    )
+
+    assert not stale.exists()
+    data = json.loads((runs_dir / "control-q01-r1.json").read_text())
+    assert data["init"]["skills"] == ["graphify"]
+    assert data["init"]["cwd"] == "/x"
+    assert data["permission_denials"] == 1
+    assert data["contamination"] == 1
+    assert data["cache_creation_tokens"] == 2
+    assert data["cache_read_tokens"] == 3
+    assert data["context_tokens"] == 6
+
+    with results_csv.open(newline="", encoding="utf-8") as f:
+        (row,) = list(csv.DictReader(f))
+    assert row["permission_denials"] == "1"
+    assert row["contamination"] == "1"
+    assert row["cache_creation_tokens"] == "2"
+    assert row["cache_read_tokens"] == "3"
+    assert row["context_tokens"] == "6"
+    assert row["total_cost_usd"] == "0.01"
+
+
+def test_rerunning_a_label_replaces_its_csv_row_instead_of_appending(tmp_path, monkeypatch):
+    # --force re-runs a label; the CSV must end up with one row per
+    # (question, arm, run), carrying the latest run, not two rows.
+    runs_dir = tmp_path / "runs"
+    results_csv = tmp_path / "results.csv"
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", results_csv)
+    monkeypatch.setattr("verify.run_arm.PROJECT_ROOT", tmp_path)
+
+    from verify.run_arm import _run_one
+
+    questions = parse_questions(QUESTIONS_PATH)
+    for cost, (q, arm) in ((0.01, (questions[0], "control")),
+                           (0.05, (questions[1], "control")),
+                           (0.02, (questions[0], "control"))):
+        monkeypatch.setattr(
+            "verify.run_arm._execute",
+            lambda inv, *, timeout, cost=cost: _result_line(total_cost_usd=cost),
+        )
+        _run_one(arm, q, 1, model="sonnet", permission_mode="default",
+                 allowed_tools=None, repos=repo_path_map(), timeout=10)
+
+    with results_csv.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert [(r["question"], r["arm"], r["run"]) for r in rows] == [("2", "control", "1"), ("1", "control", "1")]
+    assert rows[1]["total_cost_usd"] == "0.02"
+
+
+# --- --runs validation -------------------------------------------------------
+
+def test_runs_below_one_is_rejected_by_the_parser(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--dry-run", "--questions", "1", "--runs", "0"])
+    assert exc_info.value.code == 2
+    assert "--runs" in capsys.readouterr().err

@@ -1,16 +1,36 @@
 # tests/test_extract.py
+import json
 from pathlib import Path
 import pytest
 from kgc.config import Repo
-from kgc.extract import code_only_detect, extract_repo, ExtractResult
+from kgc.extract import code_only_detect, extract_repo, repo_output_dir, ExtractResult
 
 
-def test_code_only_detect_empties_non_code_categories(tmp_path):
-    (tmp_path / "mod.py").write_text("def f():\n    return 1\n")
-    (tmp_path / "README.md").write_text("# docs\n\nprose that must not be extracted\n")
-    (tmp_path / "notes.txt").write_text("more prose\n")
+@pytest.fixture
+def graphify_home(tmp_path, monkeypatch):
+    """Redirect per-repo outputs away from the real ~/.graphify for the test."""
+    home = tmp_path / "graphify-home"
+    monkeypatch.setattr("kgc.extract.global_path", lambda: home / "global-graph.json")
+    return home
 
-    result = code_only_detect(tmp_path)
+
+@pytest.fixture
+def repo_dir(tmp_path):
+    d = tmp_path / "repo"
+    d.mkdir()
+    return d
+
+
+def _snapshot(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*")}
+
+
+def test_code_only_detect_empties_non_code_categories(repo_dir, graphify_home):
+    (repo_dir / "mod.py").write_text("def f():\n    return 1\n")
+    (repo_dir / "README.md").write_text("# docs\n\nprose that must not be extracted\n")
+    (repo_dir / "notes.txt").write_text("more prose\n")
+
+    result = code_only_detect(repo_dir, cache_root=graphify_home / "repos" / "x")
 
     assert result["files"]["document"] == []
     assert result["files"]["paper"] == []
@@ -20,12 +40,16 @@ def test_code_only_detect_empties_non_code_categories(tmp_path):
     assert result["total_files"] == len(result["files"]["code"])
 
 
-def test_extract_repo_produces_graph_and_costs_no_tokens(tmp_path):
-    (tmp_path / "a.py").write_text(
+def test_repo_output_dir_lives_beside_the_global_graph(graphify_home):
+    assert repo_output_dir("fixture") == graphify_home / "repos" / "fixture" / "graphify-out"
+
+
+def test_extract_repo_produces_graph_and_costs_no_tokens(repo_dir, graphify_home):
+    (repo_dir / "a.py").write_text(
         "def helper():\n    return 2\n\n\ndef caller():\n    return helper()\n"
     )
-    (tmp_path / "README.md").write_text("# prose\n")
-    repo = Repo(path=tmp_path, tag="fixture", enabled=True)
+    (repo_dir / "README.md").write_text("# prose\n")
+    repo = Repo(path=repo_dir, tag="fixture", enabled=True)
 
     res = extract_repo(repo)
 
@@ -33,14 +57,30 @@ def test_extract_repo_produces_graph_and_costs_no_tokens(tmp_path):
     assert res.tag == "fixture"
     assert res.nodes > 0
     assert res.graph_path.exists()
-    assert res.graph_path == tmp_path / "graphify-out" / "graph.json"
+    assert res.graph_path == graphify_home / "repos" / "fixture" / "graphify-out" / "graph.json"
 
 
-def test_extract_repo_graph_has_only_python_sources_and_communities(tmp_path):
-    import json
-    (tmp_path / "a.py").write_text("import os\n\ndef f():\n    return os.getcwd()\n")
-    (tmp_path / "GUIDE.md").write_text("# a guide\n\nlots of prose here\n")
-    repo = Repo(path=tmp_path, tag="fixture", enabled=True)
+def test_extract_repo_writes_nothing_into_the_repo(repo_dir, graphify_home):
+    # The analysed checkout must stay clean: no graphify-out/, no cache, no
+    # marker files. Everything lands under the per-repo dir beside the global
+    # graph instead (the control arm of the verification harness runs in the
+    # repo and must not find a ready-made graph there).
+    (repo_dir / "a.py").write_text("import os\n\ndef f():\n    return os.getcwd()\n")
+    repo = Repo(path=repo_dir, tag="fixture", enabled=True)
+    before = _snapshot(repo_dir)
+
+    extract_repo(repo)
+
+    assert _snapshot(repo_dir) == before
+    assert not (repo_dir / "graphify-out").exists()
+    # graphify's own extraction cache goes beside graph.json, not in the repo
+    assert (graphify_home / "repos" / "fixture" / "graphify-out" / "cache").is_dir()
+
+
+def test_extract_repo_graph_has_only_python_sources_and_communities(repo_dir, graphify_home):
+    (repo_dir / "a.py").write_text("import os\n\ndef f():\n    return os.getcwd()\n")
+    (repo_dir / "GUIDE.md").write_text("# a guide\n\nlots of prose here\n")
+    repo = Repo(path=repo_dir, tag="fixture", enabled=True)
 
     res = extract_repo(repo)
     data = json.loads(res.graph_path.read_text())
@@ -60,12 +100,11 @@ def test_extract_repo_graph_has_only_python_sources_and_communities(tmp_path):
     assert all("community" in n for n in data["nodes"])
 
 
-def test_extract_repo_writes_normalised_direction(tmp_path):
-    import json
-    (tmp_path / "a.py").write_text(
+def test_extract_repo_writes_normalised_direction(repo_dir, graphify_home):
+    (repo_dir / "a.py").write_text(
         "def helper():\n    return 2\n\n\ndef caller():\n    return helper()\n"
     )
-    repo = Repo(path=tmp_path, tag="fixture", enabled=True)
+    repo = Repo(path=repo_dir, tag="fixture", enabled=True)
 
     res = extract_repo(repo)
     data = json.loads(res.graph_path.read_text())
@@ -78,17 +117,17 @@ def test_extract_repo_writes_normalised_direction(tmp_path):
         assert link["target"] == link["_tgt"]
 
 
-def test_extract_repo_missing_path_raises(tmp_path):
+def test_extract_repo_missing_path_raises(tmp_path, graphify_home):
     repo = Repo(path=tmp_path / "absent", tag="x", enabled=True)
     with pytest.raises(FileNotFoundError):
         extract_repo(repo)
 
 
-def test_code_only_detect_excludes_pdfs_without_warning(tmp_path, capsys):
-    (tmp_path / "mod.py").write_text("def f():\n    return 1\n")
-    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.4 not really")
+def test_code_only_detect_excludes_pdfs_without_warning(repo_dir, graphify_home, capsys):
+    (repo_dir / "mod.py").write_text("def f():\n    return 1\n")
+    (repo_dir / "paper.pdf").write_bytes(b"%PDF-1.4 not really")
 
-    result = code_only_detect(tmp_path)
+    result = code_only_detect(repo_dir, cache_root=graphify_home / "repos" / "x")
 
     assert result["files"]["paper"] == []
     captured = capsys.readouterr()

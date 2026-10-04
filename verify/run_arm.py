@@ -12,9 +12,12 @@ meant to be invoked by a human, not by an agent.
 
 Arms
 ----
-- **treatment**: cwd is this project (`PROJECT_ROOT`), so `.mcp.json` (the
-  `graphify` + `neo4j` MCP servers) and `CLAUDE.md` load normally. No
-  `--mcp-config` is passed - the project's own config is used.
+- **treatment**: cwd is this project (`PROJECT_ROOT`), so `CLAUDE.md` loads
+  normally, and `--mcp-config <PROJECT_ROOT>/.mcp.json --strict-mcp-config`
+  is passed so the `graphify` + `neo4j` servers are the ONLY MCP servers in
+  the session. Without `--strict-mcp-config` every server in the user's
+  global config loads too - a tool-schema token tax on treatment, and
+  untallied servers (e.g. another Neo4j MCP) that could answer the question.
 - **control**: cwd is the question's primary repo (`repo_path_map()[q.repo]`),
   and an empty `--mcp-config` + `--strict-mcp-config` is passed so no MCP
   server can leak in even if one happens to be configured globally. For a
@@ -29,6 +32,30 @@ Arms
   benefits from `CLAUDE.md` beyond that, regardless of class; that
   asymmetry is intentional (see questions.md and results.md) - the graph
   audit found agents rarely reach for graph tools unprompted.
+- **both arms** get `SKILL_ISOLATION_ARGS` (`--disallowedTools Skill
+  --disable-slash-commands`): the user's global skills include a graphify
+  skill whose trigger text says to treat any question as a graphify query
+  when `graphify-out/` exists - either arm picking that up would contaminate
+  the comparison. The init event's `mcp_servers`, `skills`, `memory_paths`
+  and `cwd` are recorded into each run's JSON so the isolation can be
+  checked after the fact, and a `contamination` counter tallies Read/Grep/
+  Glob/Bash tool calls whose input mentions `graphify-out` (a control run
+  reading a stale per-repo graph instead of the code). `kgc build` no longer
+  writes into the target repos, but earlier builds did: delete any
+  `<repo>/graphify-out/` before control runs (see results.md).
+
+Metrics
+-------
+The comparison figure is `context_tokens = input_tokens +
+cache_creation_input_tokens + cache_read_input_tokens`. With prompt caching
+nearly everything the model reads arrives as cache creation or cache read,
+not `input_tokens` - the captured sample has input_tokens=10 against
+cache_creation_input_tokens=25,641 - so input+output alone would omit ~99%
+of the context. `total_cost_usd` is kept beside it (cache reads are billed
+at a fraction of fresh input, so the two can rank arms differently).
+`permission_denials` (from the result event) is recorded because a denied
+MCP call is indistinguishable, in the answer text, from the agent choosing
+not to use the graph; results.md treats any run with denials as invalid.
 
 Every question's live prompt is the bare numbered line from questions.md -
 never the indented grader-note sub-bullets beneath it, which carry the
@@ -38,10 +65,12 @@ correctness. `_QUESTION_RE` only matches the numbered line, by construction
 `tests/test_verify_runner.py`'s rubric-language guard tests, not just by
 convention in the markdown.
 
-CLI flags verified against `claude --help` (Claude Code 2.1.258) while
-writing this file:
+CLI flags verified against `claude --help` (Claude Code 2.1.258, re-checked
+2026-10-04) while writing this file:
   --output-format stream-json, --verbose, --model, --mcp-config,
-  --strict-mcp-config, --allowedTools/--allowed-tools, --permission-mode
+  --strict-mcp-config, --allowedTools/--allowed-tools,
+  --disallowedTools/--disallowed-tools, --disable-slash-commands ("Disable
+  all skills"), --permission-mode
   (choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan - note
   there is no literal "default" choice; see `_permission_mode_args` below for
   how this script spells "use the implicit default" anyway).
@@ -50,11 +79,16 @@ writing this file:
 Per-run isolation: a malformed stdout line, a hung process, or any other
 single-run failure must not abort the other ~47 runs in a batch. See
 `parse_stream_json` (skips/counts malformed lines), `_execute` (`timeout=`,
-default 900s via `--timeout`), and `main` (each run is wrapped in its own
-try/except; a failure writes `verify/runs/<label>.error.json` instead of
-aborting, and the exit code is 1 iff anything failed). Re-running after a
-partial batch skips any run whose `<label>.json` already exists; `--force`
-re-runs everything anyway.
+default 900s via `--timeout`; note the timeout kills `claude` only - the MCP
+servers it spawned, `uvx mcp-neo4j-cypher` and `python -m graphify.serve`,
+are separate children that exit on their own once their stdio closes, so
+check `ps` after a timed-out treatment run), and `main` (each run is wrapped
+in its own try/except; a failure writes `verify/runs/<label>.error.json`
+instead of aborting, and the exit code is 1 iff anything failed). Re-running
+after a partial batch skips any run whose `<label>.json` already exists;
+`--force` re-runs everything anyway, and a re-run replaces that label's
+`results.csv` row (one row per (question, arm, run), latest wins) and
+removes any stale `<label>.error.json`.
 """
 from __future__ import annotations
 
@@ -74,6 +108,7 @@ HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 QUESTIONS_PATH = HERE / "questions.md"
 EMPTY_MCP_PATH = HERE / "empty-mcp.json"
+MCP_CONFIG_PATH = PROJECT_ROOT / ".mcp.json"
 RUNS_DIR = HERE / "runs"
 RESULTS_CSV = HERE / "results.csv"
 SCHEMA_SAMPLE_PATH = HERE / "schema-sample.jsonl"
@@ -81,9 +116,24 @@ REPOS_YAML = PROJECT_ROOT / "repos.yaml"
 
 CSV_HEADER = [
     "question", "arm", "run", "model", "input_tokens", "output_tokens",
-    "cache_read_tokens", "total_cost_usd", "duration_ms", "num_turns",
-    "malformed_lines", "graphify_calls", "neo4j_calls", "answer_file",
+    "cache_creation_tokens", "cache_read_tokens", "context_tokens",
+    "total_cost_usd", "duration_ms", "num_turns", "permission_denials",
+    "contamination", "malformed_lines", "graphify_calls", "neo4j_calls",
+    "answer_file",
 ]
+# The columns that identify one run; a re-run (--force) replaces that row.
+CSV_KEY = ("question", "arm", "run")
+
+# Passed to BOTH arms - see module docstring, "Arms".
+SKILL_ISOLATION_ARGS = ["--disallowedTools", "Skill", "--disable-slash-commands"]
+
+# Built-in tools whose input mentioning this marker means the agent reached
+# for a per-repo graphify output on disk instead of (or as well as) the code.
+CONTAMINATION_TOOLS = frozenset({"Read", "Grep", "Glob", "Bash"})
+CONTAMINATION_MARKER = "graphify-out"
+
+# Fields copied from the stream's `system`/`init` event into the run record.
+INIT_FIELDS = ("cwd", "mcp_servers", "skills", "memory_paths", "permissionMode", "model")
 
 # One line per question in questions.md: "N. **class** [repo] text".
 _QUESTION_RE = re.compile(r"^(\d+)\.\s+\*\*([a-z-]+)\*\*\s+\[([a-z-]+)\]\s+(.+)$")
@@ -184,8 +234,10 @@ def build_invocation(
     argv += _permission_mode_args(permission_mode)
     if allowed_tools:
         argv += ["--allowedTools", allowed_tools]
+    argv += SKILL_ISOLATION_ARGS
 
     if arm == "treatment":
+        argv += ["--mcp-config", str(MCP_CONFIG_PATH), "--strict-mcp-config"]
         cwd = PROJECT_ROOT
     else:
         argv += ["--mcp-config", str(EMPTY_MCP_PATH), "--strict-mcp-config"]
@@ -215,10 +267,17 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
     lines are skipped and counted in `malformed_lines`, not raised on. The
     one thing that still raises is finding no `result` event at all - that
     is a real failure (the run never completed), not noise to shrug off.
+
+    Also captured: the `system`/`init` event's isolation fields (`init`), the
+    result event's `permission_denials` count, cache token counts and the
+    derived `context_tokens`, and a `contamination` tally - see the module
+    docstring for what each is for.
     """
     result_event: dict | None = None
+    init: dict = {}
     graphify_calls = 0
     neo4j_calls = 0
+    contamination = 0
     malformed_lines = 0
     for raw_line in lines:
         raw_line = raw_line.strip()
@@ -230,7 +289,11 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
             malformed_lines += 1
             continue
         etype = event.get("type")
-        if etype == "assistant":
+        if etype == "system" and event.get("subtype") == "init":
+            # Hook events are also type=system; only the init event carries
+            # the session's servers/skills/paths.
+            init = {k: event[k] for k in INIT_FIELDS if k in event}
+        elif etype == "assistant":
             content = event.get("message", {}).get("content", []) or []
             for block in content:
                 if block.get("type") != "tool_use":
@@ -240,12 +303,22 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
                     graphify_calls += 1
                 elif name.startswith("mcp__neo4j__"):
                     neo4j_calls += 1
+                elif name in CONTAMINATION_TOOLS and CONTAMINATION_MARKER in json.dumps(
+                        block.get("input", {}), default=str):
+                    contamination += 1
         elif etype == "result":
             result_event = event
     if result_event is None:
         raise ValueError("no 'result' event found in stream-json output")
 
     usage = result_event.get("usage", {}) or {}
+    context_parts = [usage.get("input_tokens"),
+                     usage.get("cache_creation_input_tokens"),
+                     usage.get("cache_read_input_tokens")]
+    context_tokens = (
+        None if all(part is None for part in context_parts)
+        else sum(part or 0 for part in context_parts)
+    )
     return {
         "answer": result_event.get("result", ""),
         "is_error": result_event.get("is_error"),
@@ -254,7 +327,12 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
         "total_cost_usd": result_event.get("total_cost_usd"),
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
+        "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
         "cache_read_tokens": usage.get("cache_read_input_tokens"),
+        "context_tokens": context_tokens,
+        "permission_denials": len(result_event.get("permission_denials") or []),
+        "contamination": contamination,
+        "init": init,
         "graphify_calls": graphify_calls,
         "neo4j_calls": neo4j_calls,
         "malformed_lines": malformed_lines,
@@ -270,10 +348,22 @@ def _ensure_csv_header(path: Path) -> None:
         csv.writer(f).writerow(CSV_HEADER)
 
 
-def _append_csv_row(path: Path, row: dict) -> None:
+def _upsert_csv_row(path: Path, row: dict) -> None:
+    """Write `row`, replacing any existing row for the same (question, arm,
+    run) - a `--force` re-run must not leave two rows for one label. The
+    file is small (one row per run) so rewriting it whole is fine; rows
+    written by an older column set are carried forward with blanks."""
     _ensure_csv_header(path)
-    with path.open("a", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow([row[col] for col in CSV_HEADER])
+    key = tuple(str(row[col]) for col in CSV_KEY)
+    with path.open(newline="", encoding="utf-8") as f:
+        kept = [r for r in csv.DictReader(f)
+                if tuple(str(r.get(col, "")) for col in CSV_KEY) != key]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_HEADER)
+        for r in kept:
+            writer.writerow([r.get(col, "") for col in CSV_HEADER])
+        writer.writerow([row[col] for col in CSV_HEADER])
 
 
 class RunFailed(RuntimeError):
@@ -355,6 +445,12 @@ def _run_one(
                 "run": run,
                 "model": model,
                 "answer": parsed["answer"],
+                "context_tokens": parsed["context_tokens"],
+                "cache_creation_tokens": parsed["cache_creation_tokens"],
+                "cache_read_tokens": parsed["cache_read_tokens"],
+                "permission_denials": parsed["permission_denials"],
+                "contamination": parsed["contamination"],
+                "init": parsed["init"],
                 "malformed_lines": parsed["malformed_lines"],
                 "result_event": parsed["raw_result_event"],
             },
@@ -362,18 +458,24 @@ def _run_one(
         ),
         encoding="utf-8",
     )
+    # A failed earlier attempt at this label is superseded by this success.
+    (RUNS_DIR / f"{label}.error.json").unlink(missing_ok=True)
 
-    _append_csv_row(RESULTS_CSV, {
+    _upsert_csv_row(RESULTS_CSV, {
         "question": question.number,
         "arm": arm,
         "run": run,
         "model": model,
         "input_tokens": parsed["input_tokens"],
         "output_tokens": parsed["output_tokens"],
+        "cache_creation_tokens": parsed["cache_creation_tokens"],
         "cache_read_tokens": parsed["cache_read_tokens"],
+        "context_tokens": parsed["context_tokens"],
         "total_cost_usd": parsed["total_cost_usd"],
         "duration_ms": parsed["duration_ms"],
         "num_turns": parsed["num_turns"],
+        "permission_denials": parsed["permission_denials"],
+        "contamination": parsed["contamination"],
         "malformed_lines": parsed["malformed_lines"],
         "graphify_calls": parsed["graphify_calls"],
         "neo4j_calls": parsed["neo4j_calls"],
@@ -414,7 +516,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--allowed-tools", default=None,
-        help="passed through to claude's --allowedTools verbatim, e.g. 'Read Grep Glob'",
+        help="passed through to claude's --allowedTools verbatim, e.g. 'Read Grep Glob' "
+             "for control or 'mcp__graphify mcp__neo4j Read Grep Glob' for treatment "
+             "(an MCP server's tools are allowed by server name; MCP rules take no "
+             "wildcard). A run with permission_denials > 0 is invalid - see results.md.",
     )
     p.add_argument("--dry-run", action="store_true", help="print every command; write nothing")
     p.add_argument(
@@ -437,7 +542,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if args.runs < 1:
+        parser.error(f"--runs must be at least 1, got {args.runs}")
 
     if args.schema_check is not None:
         return _schema_check(Path(args.schema_check))

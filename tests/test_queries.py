@@ -61,6 +61,7 @@ def test_every_repo_scoped_query_guards_with_repo_is_null():
     for text in (q.SEARCH, q.EXACT_LABEL, q.PATH_SCOPED, q.FILE_NODE, q.CI_LABEL,
                  q.EXTERNALS, q.NODE_COUNTS, q.REL_COUNTS):
         assert "$repo IS NULL OR" in text, text
+    assert "$repo IS NULL OR $repo IN repos" in q.EXTERNALS
 
 
 def test_cross_repo_filters_both_ends_to_sourced_nodes_in_different_repos():
@@ -74,6 +75,11 @@ def test_externals_groups_by_top_level_package_and_min_repos():
     assert "split(e.label, '.')[0] AS package" in q.EXTERNALS
     assert "size(repos) >= $min_repos" in q.EXTERNALS
     assert "[:imports|imports_from]->(e:CodeNode)" in q.EXTERNALS
+    # The repo filter applies to the grouped repo list, not before grouping -
+    # otherwise repo= + min_repos>=2 could never match (a single repo's own
+    # slice can never collect >= 2 distinct repos).
+    assert "s.repo = $repo" not in q.EXTERNALS
+    assert q.EXTERNALS.index("collect(DISTINCT s.repo)") < q.EXTERNALS.index("$repo IN repos")
 
 
 def test_node_return_carries_every_field_node_line_needs():

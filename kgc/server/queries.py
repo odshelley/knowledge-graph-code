@@ -143,9 +143,9 @@ ORDER BY n DESC, repo
 
 EXTERNALS = """
 MATCH (s:CodeNode)-[:imports|imports_from]->(e:CodeNode)
-WHERE e.external = true AND s.repo IS NOT NULL AND ($repo IS NULL OR s.repo = $repo)
+WHERE e.external = true AND s.repo IS NOT NULL
 WITH split(e.label, '.')[0] AS package, collect(DISTINCT s.repo) AS repos
-WHERE size(repos) >= $min_repos
+WHERE size(repos) >= $min_repos AND ($repo IS NULL OR $repo IN repos)
 RETURN package, repos
 ORDER BY size(repos) DESC, package
 LIMIT $limit

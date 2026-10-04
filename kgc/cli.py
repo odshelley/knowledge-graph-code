@@ -108,7 +108,10 @@ def _cmd_push(args: argparse.Namespace) -> int:
     repos = load_repos(REPOS_PATH)
     tags = set(args.repo) if args.repo else {r.tag for r in repos}
     try:
-        summary = push_global_graph(graph, settings, tags, dry_run=args.dry_run)
+        summary = push_global_graph(
+            graph, settings, tags, dry_run=args.dry_run,
+            repo_paths={r.tag: str(r.path) for r in repos},
+        )
     except RuntimeError as exc:
         print(f"push failed: {exc}", file=sys.stderr)
         return 1

@@ -3,7 +3,9 @@ import pytest
 from kgc.config import Settings
 from kgc.graph.neo4j_io import (
     REAP_REPO,
+    REAP_REPO_META,
     REAP_ORPHAN_EXTERNALS,
+    REPO_UPSERT,
     preflight_capacity,
     push_global_graph,
 )
@@ -95,6 +97,9 @@ class _Recorder:
 
             def consume(self_inner):
                 return None
+
+            def __iter__(self_inner):
+                return iter([])
         return _R()
 
 
@@ -240,3 +245,65 @@ def test_push_falls_back_to_raw_order_when_markers_do_not_name_the_endpoints():
                   if "calls" in q.lower() for row in p["rows"]]
     (row,) = calls_rows
     assert {row["source"], row["target"]} == {"alpha::mod_f", "beta::mod_g"}
+
+
+def _queries(driver):
+    return [" ".join(q.split()) for q, _ in driver.session_obj.calls]
+
+
+def test_push_ensures_schema_before_any_write():
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver)
+    queries = _queries(driver)
+    # resolve_database's COUNT probe is recorded first (same fake session), so
+    # look for the schema statements anywhere before the first destructive query.
+    first_write = next(i for i, q in enumerate(queries) if "DELETE" in q)
+    assert any(q.startswith("SHOW INDEXES") for q in queries[:first_write])
+    assert any("CREATE CONSTRAINT codenode_id" in q for q in queries[:first_write])
+    assert any("CREATE FULLTEXT INDEX kgc_text" in q for q in queries[:first_write])
+
+
+def test_reap_removes_the_repo_node_so_an_incomplete_push_is_visible():
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver)
+    queries = _queries(driver)
+    meta_reap = next(i for i, q in enumerate(queries) if "MATCH (r:Repo {tag: $tag}) DELETE r" in q)
+    first_node_write = next(i for i, q in enumerate(queries) if "MERGE (n:CodeNode" in q)
+    assert meta_reap < first_node_write
+    assert "$tag" in REAP_REPO_META
+
+
+def test_push_writes_the_repo_node_last_per_push():
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha", "beta"}, driver=driver,
+                      repo_paths={"alpha": "/src/alpha", "beta": "/src/beta"})
+    queries = _queries(driver)
+    repo_writes = [i for i, q in enumerate(queries) if "MERGE (r:Repo" in q]
+    assert len(repo_writes) == 2
+    last_data_write = max(
+        i for i, q in enumerate(queries)
+        if "MERGE (n:CodeNode" in q or "[r:" in q or "NOT (n)--()" in q
+    )
+    assert last_data_write < repo_writes[0]
+
+
+def test_repo_node_carries_counts_path_and_pushed_at():
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver,
+                      repo_paths={"alpha": "/src/alpha"})
+    (params,) = [p for q, p in driver.session_obj.calls if "MERGE (r:Repo" in q]
+    assert params["tag"] == "alpha"
+    assert params["path"] == "/src/alpha"
+    assert params["node_count"] == 1          # alpha::mod_f
+    assert params["edge_count"] == 2          # alpha->numpy and beta->alpha touch alpha
+    assert params["built_at_commit"] is None  # Plan 2 supplies it
+    assert params["skipped_extensions"] == "null"
+    assert params["pushed_at"].endswith("+00:00")
+    assert "MERGE (r:Repo {tag: $tag})" in " ".join(REPO_UPSERT.split())
+
+
+def test_repo_node_path_defaults_to_empty_when_not_supplied():
+    driver = _RecordingDriver()
+    push_global_graph(_graph(), SETTINGS, {"alpha"}, driver=driver)
+    (params,) = [p for q, p in driver.session_obj.calls if "MERGE (r:Repo" in q]
+    assert params["path"] == ""

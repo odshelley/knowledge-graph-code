@@ -8,10 +8,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from neo4j import GraphDatabase
 
 from kgc.config import Settings
+from kgc.graph.schema import ensure_schema
 
 COUNT_NODES = "MATCH (n) RETURN count(n) AS nodes"
 COUNT_RELS = "MATCH ()-[r]->() RETURN count(r) AS rels"
@@ -126,6 +128,38 @@ MATCH (n:CodeNode) WHERE n.external = true AND NOT (n)--()
 DELETE n
 """
 
+# One Repo node per pushed repo, written LAST so its presence proves the push
+# completed. The reap deletes it first for the same reason: a push that dies
+# half-way leaves tagged nodes with no Repo node, which `stats` reports as
+# "last push incomplete".
+REAP_REPO_META = "MATCH (r:Repo {tag: $tag}) DELETE r"
+
+REPO_UPSERT = """
+MERGE (r:Repo {tag: $tag})
+SET r.path = $path,
+    r.pushed_at = $pushed_at,
+    r.built_at_commit = $built_at_commit,
+    r.node_count = $node_count,
+    r.edge_count = $edge_count,
+    r.skipped_extensions = $skipped_extensions
+"""
+
+
+def _repo_meta(graph, tag: str, path: str) -> dict:
+    tag_nodes = {nid for nid, d in graph.nodes(data=True) if d.get("repo") == tag}
+    return {
+        "tag": tag,
+        "path": path,
+        "pushed_at": datetime.now(timezone.utc).isoformat(),
+        # The merged global graph carries no per-repo commit; Plan 2's
+        # per-repo artefact does.
+        "built_at_commit": None,
+        "node_count": len(tag_nodes),
+        "edge_count": sum(1 for u, v in graph.edges() if u in tag_nodes or v in tag_nodes),
+        "skipped_extensions": "null",
+    }
+
+
 UPSERT_NODES = """
 UNWIND $rows AS row
 MERGE (n:CodeNode {id: row.id})
@@ -145,9 +179,6 @@ MERGE (a)-[r:{rel}]->(b)
 SET r += row.props
 """
 _REL_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-ENSURE_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.id)"
-ENSURE_REPO_INDEX = "CREATE INDEX IF NOT EXISTS FOR (n:CodeNode) ON (n.repo)"
 
 BATCH = 1000
 
@@ -207,7 +238,8 @@ def _chunks(seq, size):
 
 
 def push_global_graph(graph, settings: Settings, tags: set[str], *,
-                      dry_run: bool = False, driver=None) -> list[str]:
+                      dry_run: bool = False, driver=None,
+                      repo_paths: dict[str, str] | None = None) -> list[str]:
     """Reap then re-push each tag's slice. Externals are pushed once, shared."""
     present = _tags_in_graph(graph)
     unknown = tags - present
@@ -233,10 +265,10 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
         driver = driver or connect(settings)
         database = resolve_database(driver, settings.neo4j_database)
         with driver.session(database=database) as session:
-            session.run(ENSURE_INDEX).consume()
-            session.run(ENSURE_REPO_INDEX).consume()
+            lines.extend(ensure_schema(session))
 
             for tag in sorted(tags):
+                session.run(REAP_REPO_META, tag=tag).consume()
                 session.run(REAP_REPO, tag=tag).consume()
                 lines.append(f"reaped {tag!r}")
 
@@ -294,6 +326,11 @@ def push_global_graph(graph, settings: Settings, tags: set[str], *,
 
             session.run(REAP_ORPHAN_EXTERNALS).consume()
             lines.append("swept orphaned external nodes")
+
+            paths = repo_paths or {}
+            for tag in sorted(tags):
+                session.run(REPO_UPSERT, **_repo_meta(graph, tag, paths.get(tag, ""))).consume()
+                lines.append(f"wrote Repo node for {tag!r}")
     except Exception as exc:  # noqa: BLE001 - scrub before it can reach a log
         raise RuntimeError(
             _scrub(f"{type(exc).__name__}: {exc}", settings.neo4j_password)

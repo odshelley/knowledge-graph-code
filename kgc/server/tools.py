@@ -28,7 +28,8 @@ SCHEMA_NOTES = """Code graph schema (read-only).
 Nodes: (:CodeNode {id, label, repo, external, source_file, source_location, file_type, community}).
   Sourced nodes have repo set and id "repo::local". Externals (stdlib / third-party /
   unresolved names) have external = true, no repo, source_file = '' and merge across repos.
-  file_type is code | rationale (a docstring or comment) | external | package.
+  file_type is code | rationale (a docstring or comment) | concept (external stubs and
+  unresolved names). Identify externals by external = true, never by file_type.
 (:Repo {tag, path, pushed_at, built_at_commit, node_count, edge_count, skipped_extensions}) - one per repo.
 Relationships (native types): calls, indirect_call, imports, imports_from, contains, method,
   inherits, references, uses, rationale_for.

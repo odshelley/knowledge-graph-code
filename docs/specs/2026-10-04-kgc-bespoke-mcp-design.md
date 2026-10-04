@@ -311,7 +311,7 @@ A superset of what is in the database today (40,398 nodes, 122,277 edges at
 | `source_file`, `source_location` | repo-relative path; `Lnn` |
 | `repo` | tag. **Absent** on externals — this is what makes reap-by-tag safe |
 | `external` | boolean |
-| `file_type` | `code`, `rationale`, `external`, `package` |
+| `file_type` | `code`, `rationale`, `concept` (externals and unresolved names; identify externals by `external`) |
 | `community` | per-repo cluster id (int) |
 | `callable`, `origin` | today's `_callable`, `_origin`, emitted clean by the Plan 2 exporter |
 

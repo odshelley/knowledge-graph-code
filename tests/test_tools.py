@@ -148,12 +148,39 @@ def test_callers_propagates_resolution_failures():
     assert tools.callers(FakeBackend(), "ghost") == "no node matches 'ghost'"
 
 
-def test_callers_passes_repo_to_the_neighbour_query_not_to_resolution():
-    db = FakeBackend([_exact(PUSH_ONE)])
-    tools.callers(db, "push_one", repo="graphify")
+def test_callers_with_repo_resolves_within_that_repo_first():
+    alpha_row = node_row("a::f", "f()", repo="alpha", source_file="a.py")
+    beta_row = node_row("b::f", "f()", repo="beta", source_file="b.py")
+
+    def matcher(qq, p):
+        return qq == q.EXACT_LABEL and p.get("label") == "f"
+
+    def rows(p):
+        if p.get("repo") == "alpha":
+            return [alpha_row]
+        if p.get("repo") is None:
+            return [alpha_row, beta_row]
+        return []
+
+    db = FakeBackend([(matcher, rows)])
+    out = tools.callers(db, "f", repo="alpha")
+    assert "ambiguous" not in out and "no node matches" not in out
+    assert db.calls[-1][1]["repo"] == "alpha"
+
+
+def test_callers_with_repo_falls_back_to_global_resolution_when_the_repo_has_no_match():
+    row = node_row("a::f", "f()", repo="alpha", source_file="a.py")
+
+    def matcher(qq, p):
+        return qq == q.EXACT_LABEL and p.get("label") == "f" and p.get("repo") is None
+
+    db = FakeBackend([(matcher, [row])])
+    out = tools.callers(db, "f", repo="beta")
+    assert "ambiguous" not in out and "no node matches" not in out
     resolve_calls = [p for qq, p in db.calls if qq == q.EXACT_LABEL]
-    assert resolve_calls[0]["repo"] is None
-    assert db.calls[-1][1]["repo"] == "graphify"
+    assert resolve_calls[0]["repo"] == "beta"
+    assert resolve_calls[-1]["repo"] is None
+    assert db.calls[-1][1]["repo"] == "beta"
 
 
 # --- impact ---------------------------------------------------------------------

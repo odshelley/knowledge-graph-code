@@ -120,9 +120,14 @@ def describe(db, symbol: str, repo: str | None = None,
 
 def _neighbours(db, direction: str, rels, word: str, symbol: str, repo: str | None,
                 depth: int, max_tokens: int) -> str:
-    # The symbol resolves globally; `repo` narrows the *results*. A target that
-    # is ambiguous across repos comes back as candidates to pick from.
-    res = resolve(db, symbol, None)
+    # The symbol resolves within `repo` first, so passing repo= is a genuine
+    # retry (not the same candidate list again); if nothing matches in that
+    # repo, fall back to a global resolution rather than reporting candidates
+    # a repo filter could never have narrowed. `repo` still narrows the
+    # neighbour query's *results* either way.
+    res = resolve(db, symbol, repo)
+    if repo is not None and not res.ok and not res.candidates:
+        res = resolve(db, symbol, None)
     if not res.ok:
         return _unresolved(symbol, res)
     rows = db.read(q.neighbours(direction, rels, depth), id=res.node.id, repo=repo,

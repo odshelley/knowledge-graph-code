@@ -53,7 +53,8 @@ class _Driver:
     def session(self, database=None):
         self.sessions += 1
         self.database = database
-        return _Session(self.rows, self.fail)
+        self.last_session = _Session(self.rows, self.fail)
+        return self.last_session
 
     def close(self):
         self.closed = True
@@ -88,6 +89,7 @@ def test_read_passes_query_and_params_into_the_read_transaction():
     backend.read("MATCH (n {id: $id}) RETURN n", id="x", limit=3)
     # the session was created inside read(); grab the tx it ran on
     assert driver.sessions == 1
+    assert driver.last_session.tx.ran == [("MATCH (n {id: $id}) RETURN n", {"id": "x", "limit": 3})]
 
 
 def test_unit_of_work_timeout_is_ten_seconds():
@@ -152,3 +154,24 @@ def test_close_is_safe_before_and_after_connecting():
     backend.read("RETURN 1 AS a")
     backend.close()
     assert driver.closed is True
+
+
+def test_resolve_failure_closes_the_fresh_driver_and_reports_unreachable():
+    calls = []
+    driver = _Driver(rows=[{"a": 1}])
+
+    def connect_fn(settings):
+        calls.append(settings)
+        return driver
+
+    def resolve_fn(d, name):
+        raise RuntimeError("neither database name worked")
+
+    backend = Backend(SETTINGS, connect_fn=connect_fn, resolve_fn=resolve_fn)
+    with pytest.raises(KgcError) as ei:
+        backend.read("RETURN 1")
+    assert str(ei.value) == "cannot reach Neo4j at f35a6a04.databases.neo4j.io; is the instance paused?"
+    assert driver.closed is True
+    with pytest.raises(KgcError):
+        backend.read("RETURN 1")
+    assert len(calls) == 2  # the driver was reset, so it reconnected

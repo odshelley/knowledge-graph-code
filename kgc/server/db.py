@@ -52,10 +52,18 @@ class Backend:
             return
         try:
             driver = self._connect(self._settings)
-            self._database = self._resolve(driver, self._settings.neo4j_database)
         except Exception:  # noqa: BLE001 - every connect failure is "unreachable" to the agent
             raise self._unreachable() from None
+        try:
+            database = self._resolve(driver, self._settings.neo4j_database)
+        except Exception:  # noqa: BLE001 - resolve failure is also "unreachable" to the agent
+            try:
+                driver.close()
+            except Exception:  # noqa: BLE001 - closing a fresh driver may still fail
+                pass
+            raise self._unreachable() from None
         self._driver = driver
+        self._database = database
 
     def _reset(self) -> None:
         driver, self._driver, self._database = self._driver, None, None

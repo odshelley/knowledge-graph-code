@@ -237,3 +237,62 @@ def test_serve_refuses_cleanly_when_env_is_missing(tmp_path, capsys):
 
     err = capsys.readouterr().err
     assert "serve refused:" in err
+
+
+# --- kgc init: local checkout map (CLAUDE.local.md) -------------------------
+
+def test_init_writes_only_checkouts_that_exist_and_names_the_ones_that_do_not(
+        tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    here = tmp_path / "alpha"
+    here.mkdir()
+    repos = tmp_path / "repos.yaml"
+    repos.write_text(
+        f"repos:\n  - path: {here}\n    tag: alpha\n"
+        f"  - path: {tmp_path / 'gone'}\n    tag: beta\n", encoding="utf-8")
+    monkeypatch.setattr("kgc.cli.REPOS_PATH", repos)
+    local_md = tmp_path / "CLAUDE.local.md"
+
+    assert main(["init", "--env", str(env), "--out", str(tmp_path / ".mcp.json"),
+                 "--local-md", str(local_md)]) == 0
+
+    text = local_md.read_text(encoding="utf-8")
+    assert "# kgc local checkouts" in text
+    assert f"`alpha` — `{here.resolve()}`" in text
+    assert "beta" not in text
+    out = capsys.readouterr().out
+    assert "1 local checkout(s)" in out
+    assert "not checked out here" in out and "beta" in out
+
+
+def test_init_rewrites_the_local_map_when_a_repo_moves(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    first, second = tmp_path / "one", tmp_path / "two"
+    first.mkdir(); second.mkdir()
+    repos = tmp_path / "repos.yaml"
+    local_md = tmp_path / "CLAUDE.local.md"
+    argv = ["init", "--env", str(env), "--out", str(tmp_path / ".mcp.json"),
+            "--local-md", str(local_md)]
+    monkeypatch.setattr("kgc.cli.REPOS_PATH", repos)
+
+    repos.write_text(f"repos:\n  - path: {first}\n    tag: alpha\n", encoding="utf-8")
+    assert main(argv) == 0
+    repos.write_text(f"repos:\n  - path: {second}\n    tag: alpha\n", encoding="utf-8")
+    assert main(argv) == 0
+
+    text = local_md.read_text(encoding="utf-8")
+    assert text.count("# kgc local checkouts") == 1, "stale copy left behind"
+    assert str(second.resolve()) in text and str(first.resolve()) not in text
+    assert "updated" in capsys.readouterr().out
+
+
+def test_init_reports_an_unwritable_local_md_without_a_traceback(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    _repos(tmp_path, monkeypatch)
+
+    assert main(["init", "--env", str(env), "--out", str(tmp_path / ".mcp.json"),
+                 "--local-md", str(tmp_path / "missing-dir" / "CLAUDE.local.md")]) == 1
+
+    err = capsys.readouterr().err
+    assert "init failed:" in err
+    assert "s3cret" not in err

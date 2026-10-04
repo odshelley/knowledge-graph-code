@@ -27,6 +27,10 @@ verify/kgc-mcp.json
 verify/runs/*.json
 verify/results.csv
 
+# Machine-specific repo checkout paths written by `kgc init`; the shared
+# CLAUDE.md stays path-free so it means the same thing on every box.
+CLAUDE.local.md
+
 # Review working notes, OS and tool litter.
 .superpowers/
 .DS_Store

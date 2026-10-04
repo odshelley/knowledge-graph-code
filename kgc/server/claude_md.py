@@ -1,12 +1,22 @@
-"""The CLAUDE.md block that nudges Claude Code to reach for the graph.
+"""The CLAUDE.md blocks that tell Claude Code about the graph.
 
-One source of truth: `kgc init` prints or appends it, the project's own
-CLAUDE.md is exactly this text, and the harness writes it into the kgc arm's
-working directory.
+Two blocks, deliberately separate:
+
+`render_claude_md` is the machine-agnostic one. `kgc init` prints or appends
+it, the project's own CLAUDE.md is exactly this text, and the harness writes
+it into the kgc arm's working directory. It must never contain an absolute
+path, or those three uses diverge per machine.
+
+`render_local_checkouts` is the machine-specific one: where this box has each
+repo cloned, so the agent can open the file the graph points at. It goes in
+CLAUDE.local.md, which is gitignored, because the graph is shared and the
+paths are not. At work, CI builds the graph on a path nobody queries from;
+this file is how a laptop says where its own copies live.
 """
 from __future__ import annotations
 
 MARKER = "# kgc code graph"
+LOCAL_MARKER = "# kgc local checkouts"
 
 _TEMPLATE = """{marker}
 
@@ -30,3 +40,35 @@ The graph is static code structure. It cannot see dependency injection, registri
 def render_claude_md(tags: list[str]) -> str:
     repos = ", ".join(f"`{t}`" for t in tags) if tags else "(none pushed yet)"
     return _TEMPLATE.format(marker=MARKER, repos=repos)
+
+
+_LOCAL_TEMPLATE = """{marker}
+
+The graph answers in repo-relative paths. These repos are checked out on this machine:
+
+{rows}
+
+To open a hit, join the repo's path above to the repo-relative path the graph gave you: a hit of `some/dir/file.py:L61` in `{example_tag}` is `{example_path}/some/dir/file.py` at line 61.
+
+Use the graph to find WHERE something is and WHAT connects to it, then read that file for what the code actually does: the graph stores names, locations and truncated docstrings, never function bodies. A repo the graph names that is absent from the list above is indexed but not cloned here; `repos.yaml` says where it was built from.
+"""
+
+
+def render_local_checkouts(paths: dict[str, str]) -> str:
+    """The CLAUDE.local.md block mapping each repo tag to its path on THIS machine.
+
+    `paths` is {tag: absolute path}, already filtered to checkouts that exist.
+    """
+    if not paths:
+        return (
+            f"{LOCAL_MARKER}\n\n"
+            "No repo in `repos.yaml` is checked out at its recorded path on this "
+            "machine, so graph results cannot be opened locally. Fix the paths in "
+            "`repos.yaml` and re-run `kgc init`.\n"
+        )
+    rows = "\n".join(f"- `{tag}` — `{paths[tag]}`" for tag in sorted(paths))
+    example_tag = sorted(paths)[0]
+    return _LOCAL_TEMPLATE.format(
+        marker=LOCAL_MARKER, rows=rows,
+        example_tag=example_tag, example_path=paths[example_tag],
+    )

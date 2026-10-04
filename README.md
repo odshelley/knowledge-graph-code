@@ -25,6 +25,14 @@ cp .env.example .env            # then fill in the four NEO4J_* values; .env is 
 project's own `CLAUDE.md` is exactly that block, so a fresh checkout needs only
 the `.mcp.json`.
 
+`kgc init` also writes `CLAUDE.local.md` (gitignored), mapping each repo tag to
+where that repo is cloned **on this machine**, taken from `repos.yaml` and
+filtered to directories that actually exist. The graph answers in repo-relative
+paths, so this is what lets the agent open the file a result points at. The
+shared `CLAUDE.md` deliberately carries no absolute path: the graph is identical
+on every box and the checkouts are not. Re-run `kgc init` after moving or
+cloning a repo; the block is replaced in place, never duplicated.
+
 ## Run order
 
 ```bash

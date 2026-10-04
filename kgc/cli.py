@@ -141,9 +141,28 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _local_checkouts(repos) -> tuple[dict[str, str], list[str]]:
+    """Split repos into {tag: absolute path} for checkouts that exist on this
+    machine, and the tags whose recorded path does not."""
+    present: dict[str, str] = {}
+    missing: list[str] = []
+    for repo in repos:
+        path = Path(repo.path).expanduser()
+        if path.is_dir():
+            present[repo.tag] = str(path.resolve())
+        else:
+            missing.append(repo.tag)
+    return present, missing
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
-    from kgc.server.claude_md import render_claude_md
-    from kgc.server.setup import append_claude_md, build_mcp_config, write_private
+    from kgc.server.claude_md import render_claude_md, render_local_checkouts
+    from kgc.server.setup import (
+        append_claude_md,
+        build_mcp_config,
+        upsert_block,
+        write_private,
+    )
 
     env_path = Path(args.env)
     try:
@@ -173,6 +192,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
     else:
         print("\nAdd this to your CLAUDE.md:\n")
         print(block, end="")
+
+    # Where this machine has each repo cloned. Kept out of the shared block
+    # (and out of git) because the graph is the same everywhere and these
+    # paths are not.
+    present, missing = _local_checkouts(repos)
+    local_md = Path(args.local_md)
+    try:
+        action = upsert_block(local_md, render_local_checkouts(present))
+    except OSError as exc:
+        print(f"init failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"{action} {local_md} ({len(present)} local checkout(s))")
+    if missing:
+        print(f"  not checked out here, so graph hits cannot be opened: {', '.join(sorted(missing))}")
     return 0
 
 
@@ -206,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--out", default=".mcp.json", help="where to write the MCP config (default: ./.mcp.json)")
     p_init.add_argument("--claude-md", default=None, metavar="PATH",
                         help="append the block to this CLAUDE.md instead of printing it")
+    p_init.add_argument("--local-md", default="CLAUDE.local.md", metavar="PATH",
+                        help="where to write this machine's repo checkout paths "
+                             "(default: ./CLAUDE.local.md, gitignored)")
     p_init.set_defaults(func=_cmd_init)
 
     args = parser.parse_args(argv)

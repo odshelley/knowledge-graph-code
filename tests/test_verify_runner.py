@@ -884,10 +884,6 @@ def test_arm_both_means_control_and_treatment_only(capsys):
 
 
 def test_run_one_records_kgc_calls_and_isolation(tmp_path, monkeypatch):
-    # Copy the monkeypatch lines from test_run_one_persists_malformed_lines_in_json_and_csv
-    # VERBATIM (they redirect every path _run_one writes to, including whatever
-    # answer_file is made relative to); the two lines below are the minimum and
-    # may need that test's extra ones. Then fake _execute with the stream.
     import verify.run_arm as ra
     monkeypatch.setattr(ra, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(ra, "RESULTS_CSV", tmp_path / "results.csv")

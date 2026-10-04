@@ -50,8 +50,11 @@ mcp-neo4j-cypher) and kgc (this server).
 .venv/bin/kgc push                                       # once after Plan 1 lands: creates kgc_text + Repo nodes
 .venv/bin/python setup_mcp.py --out verify/treatment-mcp.json
 .venv/bin/kgc init --out verify/kgc-mcp.json
-.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc   # pre-flight: isolation_ok, kgc_calls > 0
+.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc --allowed-tools "mcp__kgc Read Grep Glob"
 ```
+
+Headless runs cannot approve tool calls, so without `--allowed-tools` every
+MCP call is a permission denial and the run is invalid.
 
 1. Earlier builds wrote `<repo>/graphify-out/` into the target repos; delete any
    that remain (they are untracked). The user's global graphify skill treats a

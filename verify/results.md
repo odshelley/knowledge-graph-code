@@ -76,20 +76,20 @@ with `permission_denials > 0` is **invalid** and must not be entered here;
 re-run it (see "How to run", step 3). A run with `contamination > 0` is
 entered but flagged in Notes.
 
-| # | Class | Control tokens (r1, r2, …) | Control median | Treatment tokens (r1, r2, …) | Treatment median | Median ratio (T / C) | Median cost T / C (USD) | Control correct (all runs) | Treatment correct (all runs) | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | cross-repo | | | | | | | | | |
-| 2 | cross-repo | | | | | | | | | |
-| 3 | cross-repo | | | | | | | | | |
-| 4 | cross-repo | | | | | | | | | |
-| 5 | cross-repo | | | | | | | | | |
-| 6 | single-repo | | | | | | | | | expected treatment loss is informative, not a failure |
-| 7 | single-repo | | | | | | | | | expected treatment loss is informative, not a failure |
-| 8 | single-repo | | | | | | | | | expected treatment loss is informative, not a failure |
-| 9 | hidden-dependency | | | | | | | | | treatment must hedge/decline, never assert a concrete wrong answer |
-| 10 | hidden-dependency | | | | | | | | | treatment must hedge/decline, never assert a concrete wrong answer |
-| 11 | blind-spot | | | | | | | | | treatment must name the extractor gap, not just report "zero nodes" |
-| 12 | blind-spot | | | | | | | | | treatment must name the cross-language gap, not stay silent or fabricate |
+| # | Class | Control tokens (r1, r2, …) | Control median | Treatment tokens (r1, r2, …) | Treatment median | kgc median | Median ratio (T / C) | Median cost T / C (USD) | Control correct (all runs) | Treatment correct (all runs) | kgc correct (all runs) | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | cross-repo | | | | | | | | | | | |
+| 2 | cross-repo | | | | | | | | | | | |
+| 3 | cross-repo | | | | | | | | | | | |
+| 4 | cross-repo | | | | | | | | | | | |
+| 5 | cross-repo | | | | | | | | | | | |
+| 6 | single-repo | | | | | | | | | | | expected treatment loss is informative, not a failure |
+| 7 | single-repo | | | | | | | | | | | expected treatment loss is informative, not a failure |
+| 8 | single-repo | | | | | | | | | | | expected treatment loss is informative, not a failure |
+| 9 | hidden-dependency | | | | | | | | | | | treatment must hedge/decline, never assert a concrete wrong answer |
+| 10 | hidden-dependency | | | | | | | | | | | treatment must hedge/decline, never assert a concrete wrong answer |
+| 11 | blind-spot | | | | | | | | | | | treatment must name the extractor gap, not just report "zero nodes" |
+| 12 | blind-spot | | | | | | | | | | | treatment must name the cross-language gap, not stay silent or fabricate |
 
 ## Verdict
 
@@ -157,8 +157,12 @@ reading the code. In order:
 .venv/bin/kgc push                                       # once after Plan 1 lands: creates kgc_text + Repo nodes
 .venv/bin/python setup_mcp.py --out verify/treatment-mcp.json
 .venv/bin/kgc init --out verify/kgc-mcp.json
-.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc   # pre-flight: isolation_ok, kgc_calls > 0
+.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc --allowed-tools "mcp__kgc Read Grep Glob"
 ```
+
+Headless runs cannot approve tool calls, so without `--allowed-tools` every
+MCP call is a permission denial and the run is invalid; the pre-flight line
+above carries it for exactly that reason.
 
 1. **Clear stale per-repo graphs.** Earlier `kgc build`s wrote
    `<repo>/graphify-out/` into each of the five target repos; the current
@@ -171,12 +175,13 @@ reading the code. In order:
    reading a ready-made graph is not a control run. The `contamination`
    column (below) catches it after the fact; this step prevents it.
 2. `.venv/bin/python verify/run_arm.py --dry-run` - prints every command it
-   would run (48 by default: 12 questions × 2 arms × 2 runs) and writes
+   would run (72 by default: 12 questions × 3 arms × 2 runs) and writes
    nothing. Read a few of the printed commands and sanity-check the cwd and
    flags before spending anything for real. What you should see:
    - **both arms:** `--disallowedTools Skill --disable-slash-commands`, so
      no user skill (in particular the graphify skill) can take part;
-   - **treatment:** cwd is this project; `--mcp-config <project>/.mcp.json
+   - **treatment:** runs in a per-run temp cwd holding only
+     `verify/arms/treatment/CLAUDE.md`; `--mcp-config verify/treatment-mcp.json
      --strict-mcp-config`, so `graphify` and `neo4j` are the only MCP
      servers in the session (without `--strict-mcp-config` every server in
      the user's global config would load too: a tool-schema token tax on
@@ -258,7 +263,7 @@ reading the code. In order:
    **not** the `*.error.json` records, which hold no answer - read the
    `answer` field against the real code (the file paths named in
    `questions.md` are a starting point, not the full answer) and fill in the
-   Control correct / Treatment correct columns above. This is the one step
+   Control correct / Treatment correct / kgc correct columns above. This is the one step
    that cannot be automated - it is why this task's output is a harness, not
    a result.
 6. Fill in the Verdict and "Which MCP server answered" sections from

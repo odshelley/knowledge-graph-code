@@ -24,7 +24,9 @@ def test_server_registers_exactly_the_nine_tools_in_order():
     listed = anyio.run(server.list_tools)
     assert [t.name for t in listed] == list(TOOL_NAMES)
     assert all(t.description for t in listed)
-    assert "caller -> callee" in server.instructions
+    cypher_description = next(t for t in listed if t.name == "cypher").description
+    assert "caller -> callee" in cypher_description
+    assert "caller -> callee" not in server.instructions
 
 
 def test_search_description_names_the_indexed_repos_when_known():

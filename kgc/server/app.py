@@ -48,7 +48,13 @@ def _run(fn, **kwargs) -> str:
 
 
 def build_server(backend, *, repo_tags: list[str] | None = None) -> MCPServer:
-    server = MCPServer(name=SERVER_NAME, instructions=tools.SCHEMA_NOTES)
+    server = MCPServer(
+        name=SERVER_NAME,
+        instructions=(
+            "kgc: a read-only code graph of several repos. Nine tools; the schema "
+            "and direction convention are in the cypher tool's description."
+        ),
+    )
     tags = list(repo_tags or [])
     search_description = tools.DESCRIPTIONS["search"] + (
         f" Repos indexed: {', '.join(tags)}." if tags else ""

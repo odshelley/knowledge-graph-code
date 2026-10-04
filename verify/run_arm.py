@@ -449,7 +449,11 @@ def isolation_ok(arm: str, init: dict) -> bool | None:
     servers = init.get("mcp_servers")
     if servers is None:
         return None
-    names = {s.get("name") if isinstance(s, dict) else str(s) for s in servers}
+    names = {
+        s.get("name") if isinstance(s, dict) else str(s)
+        for s in servers
+        if not isinstance(s, dict) or s.get("status", "connected") == "connected"
+    }
     return names == set(EXPECTED_SERVERS[arm])
 
 

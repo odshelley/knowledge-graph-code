@@ -865,6 +865,10 @@ def test_isolation_ok_compares_the_init_servers_to_the_arms_expectation():
     assert isolation_ok("control", {}) is None
 
 
+def test_isolation_ok_does_not_count_a_server_that_failed_to_connect():
+    assert isolation_ok("kgc", {"mcp_servers": [{"name": "kgc", "status": "failed"}]}) is False
+
+
 def test_dry_run_prints_all_three_arms_by_default(capsys):
     assert main(["--dry-run", "--questions", "1", "--runs", "1"]) == 0
     out = capsys.readouterr().out

@@ -35,7 +35,7 @@ def startup_repo_tags(backend, timeout: float = STARTUP_TIMEOUT_SECONDS) -> list
     thread = threading.Thread(target=fetch_tags, name="kgc-startup", daemon=True)
     thread.start()
     thread.join(timeout=timeout)
-    return result
+    return list(result)
 
 
 def _run(fn, **kwargs) -> str:

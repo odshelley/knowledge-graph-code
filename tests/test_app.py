@@ -90,6 +90,18 @@ def test_startup_repo_tags_reads_tags_or_falls_back_quietly():
     assert startup_repo_tags(_Down()) == []
 
 
+def test_startup_repo_tags_returns_a_copy_the_background_thread_cannot_later_mutate():
+    class _Slow(FakeBackend):
+        def read(self, query, **params):
+            time.sleep(0.1)
+            return [{"tag": "late"}]
+
+    returned = startup_repo_tags(_Slow(), timeout=0.02)
+    assert returned == []
+    time.sleep(0.2)                      # the background thread has now finished writing
+    assert returned == []                # but the list we were handed is unaffected
+
+
 def test_startup_repo_tags_gives_up_after_the_timeout():
     class _Slow(FakeBackend):
         def read(self, query, **params):

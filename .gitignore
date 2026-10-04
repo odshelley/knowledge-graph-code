@@ -14,3 +14,9 @@ __pycache__/
 
 # Generated MCP config contains the Neo4j password.
 .mcp.json
+
+# Task 7 verification harness: raw per-run data the human produces by
+# actually running verify/run_arm.py. The harness itself (questions.md,
+# results.md, run_arm.py, empty-mcp.json, runs/.gitkeep) stays tracked.
+verify/runs/*.json
+verify/results.csv

@@ -1,0 +1,287 @@
+"""Pure-function tests for the verification harness runner.
+
+No subprocess is ever invoked here - these tests cover command construction
+and output parsing only. Actually running `claude -p ...` is the human's job
+(see verify/results.md, "How to run"); see verify/run_arm.py's module
+docstring for why.
+"""
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+import pytest
+
+from verify.run_arm import (
+    CSV_HEADER,
+    EMPTY_MCP_PATH,
+    PROJECT_ROOT,
+    QUESTIONS_PATH,
+    build_invocation,
+    main,
+    parse_questions,
+    parse_stream_json,
+    repo_path_map,
+)
+
+SCHEMA_SAMPLE = Path(__file__).resolve().parent.parent / "verify" / "schema-sample.jsonl"
+
+
+# --- questions.md parsing -----------------------------------------------
+
+def test_questions_md_parses_to_exactly_twelve():
+    questions = parse_questions(QUESTIONS_PATH)
+    assert len(questions) == 12
+    assert [q.number for q in questions] == list(range(1, 13))
+
+
+def test_every_question_has_number_class_repo_text():
+    valid_classes = {"cross-repo", "single-repo", "hidden-dependency", "blind-spot"}
+    valid_repos = set(repo_path_map())
+    for q in parse_questions(QUESTIONS_PATH):
+        assert isinstance(q.number, int)
+        assert q.cls in valid_classes
+        assert q.repo in valid_repos
+        assert q.text and not q.text.isspace()
+
+
+def test_question_class_distribution_matches_the_spec():
+    questions = parse_questions(QUESTIONS_PATH)
+    counts: dict[str, int] = {}
+    for q in questions:
+        counts[q.cls] = counts.get(q.cls, 0) + 1
+    assert counts == {
+        "cross-repo": 5,
+        "single-repo": 3,
+        "hidden-dependency": 2,
+        "blind-spot": 2,
+    }
+
+
+# --- repo_path_map --------------------------------------------------------
+
+def test_repo_path_map_has_all_five_tags():
+    repos = repo_path_map()
+    assert set(repos) == {
+        "knowledge-retrieval",
+        "graphify",
+        "neural-particle-method",
+        "diffusion-bridge",
+        "claude",
+    }
+    for path in repos.values():
+        assert isinstance(path, Path)
+
+
+# --- command construction -------------------------------------------------
+
+def _first_question():
+    return parse_questions(QUESTIONS_PATH)[0]
+
+
+def test_treatment_invocation_uses_project_cwd_and_no_mcp_config():
+    q = _first_question()
+    inv = build_invocation(
+        "treatment", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
+    )
+    assert inv.cwd == PROJECT_ROOT
+    assert "--mcp-config" not in inv.argv
+    assert "--strict-mcp-config" not in inv.argv
+    assert q.text in " ".join(inv.argv)
+
+
+def test_control_invocation_uses_question_repo_cwd_and_empty_mcp_config():
+    q = _first_question()
+    repos = repo_path_map()
+    inv = build_invocation(
+        "control", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
+    )
+    assert inv.cwd == repos[q.repo]
+    assert "--mcp-config" in inv.argv
+    idx = inv.argv.index("--mcp-config")
+    assert inv.argv[idx + 1] == str(EMPTY_MCP_PATH)
+    assert "--strict-mcp-config" in inv.argv
+
+
+def test_control_prompt_lists_all_five_repo_paths_for_fairness():
+    q = _first_question()
+    inv = build_invocation(
+        "control", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
+    )
+    prompt = inv.argv[inv.argv.index("-p") + 1]
+    for path in repo_path_map().values():
+        assert str(path) in prompt
+
+
+def test_permission_mode_default_omits_the_flag():
+    q = _first_question()
+    inv = build_invocation(
+        "treatment", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
+    )
+    assert "--permission-mode" not in inv.argv
+
+
+def test_permission_mode_explicit_value_is_passed_through():
+    q = _first_question()
+    inv = build_invocation(
+        "treatment", q, run=1, model="sonnet", permission_mode="acceptEdits", allowed_tools=None,
+    )
+    assert "--permission-mode" in inv.argv
+    idx = inv.argv.index("--permission-mode")
+    assert inv.argv[idx + 1] == "acceptEdits"
+
+
+def test_allowed_tools_passed_through_when_given():
+    q = _first_question()
+    inv = build_invocation(
+        "control", q, run=1, model="sonnet", permission_mode="default",
+        allowed_tools="Read Grep Glob",
+    )
+    assert "--allowedTools" in inv.argv
+    idx = inv.argv.index("--allowedTools")
+    assert inv.argv[idx + 1] == "Read Grep Glob"
+
+
+def test_both_arms_request_stream_json_and_a_model():
+    q = _first_question()
+    for arm in ("control", "treatment"):
+        inv = build_invocation(
+            arm, q, run=1, model="haiku", permission_mode="default", allowed_tools=None,
+        )
+        assert "--output-format" in inv.argv
+        assert inv.argv[inv.argv.index("--output-format") + 1] == "stream-json"
+        assert "--model" in inv.argv
+        assert inv.argv[inv.argv.index("--model") + 1] == "haiku"
+        assert "--verbose" in inv.argv
+
+
+# --- stream-json parsing ---------------------------------------------------
+
+def test_parse_stream_json_extracts_usage_from_a_minimal_result_event():
+    lines = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        }),
+        json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "duration_ms": 1699,
+            "total_cost_usd": 0.0516,
+            "result": "OK",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 63,
+                "cache_read_input_tokens": 0,
+            },
+        }),
+    ]
+    parsed = parse_stream_json(lines)
+    assert parsed["answer"] == "OK"
+    assert parsed["input_tokens"] == 10
+    assert parsed["output_tokens"] == 63
+    assert parsed["cache_read_tokens"] == 0
+    assert parsed["total_cost_usd"] == 0.0516
+    assert parsed["duration_ms"] == 1699
+    assert parsed["num_turns"] == 1
+    assert parsed["graphify_calls"] == 0
+    assert parsed["neo4j_calls"] == 0
+
+
+def test_parse_stream_json_tallies_mcp_tool_calls_by_server():
+    lines = [
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "mcp__graphify__query_graph", "input": {}},
+                {"type": "tool_use", "name": "mcp__graphify__get_node", "input": {}},
+            ]},
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "mcp__neo4j__read_neo4j_cypher", "input": {}},
+            ]},
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {}},
+            ]},
+        }),
+        json.dumps({
+            "type": "result", "is_error": False, "num_turns": 3, "duration_ms": 1,
+            "total_cost_usd": 0.01, "result": "answer", "usage": {},
+        }),
+    ]
+    parsed = parse_stream_json(lines)
+    assert parsed["graphify_calls"] == 2
+    assert parsed["neo4j_calls"] == 1
+
+
+def test_parse_stream_json_raises_without_a_result_event():
+    with pytest.raises(ValueError):
+        parse_stream_json([json.dumps({"type": "system", "subtype": "init"})])
+
+
+@pytest.mark.skipif(not SCHEMA_SAMPLE.exists(), reason="no captured schema sample")
+def test_parser_handles_the_real_captured_schema_sample():
+    lines = SCHEMA_SAMPLE.read_text(encoding="utf-8").splitlines()
+    parsed = parse_stream_json(lines)
+    assert parsed["answer"] == "OK"
+    assert parsed["num_turns"] == 1
+    assert parsed["input_tokens"] == 10
+    assert parsed["output_tokens"] == 63
+    assert parsed["cache_read_tokens"] == 0
+    assert parsed["duration_ms"] == 1699
+    assert parsed["total_cost_usd"] == pytest.approx(0.051607)
+    assert parsed["graphify_calls"] == 0
+    assert parsed["neo4j_calls"] == 0
+
+
+# --- CSV header -------------------------------------------------------------
+
+def test_csv_header_matches_the_documented_columns():
+    assert CSV_HEADER == [
+        "question", "arm", "run", "model", "input_tokens", "output_tokens",
+        "cache_read_tokens", "total_cost_usd", "duration_ms", "num_turns",
+        "graphify_calls", "neo4j_calls", "answer_file",
+    ]
+
+
+# --- --dry-run writes nothing ----------------------------------------------
+
+def test_dry_run_creates_no_files_under_verify_runs(tmp_path, monkeypatch, capsys):
+    runs_dir = tmp_path / "runs"
+    results_csv = tmp_path / "results.csv"
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", results_csv)
+
+    result = main(["--dry-run", "--questions", "1", "--runs", "1"])
+
+    assert result == 0
+    assert not runs_dir.exists() or not list(runs_dir.glob("*.json"))
+    assert not results_csv.exists()
+    out = capsys.readouterr().out
+    assert "claude" in out
+    assert "-p" in out
+
+
+def test_dry_run_prints_both_arms_by_default(capsys):
+    result = main(["--dry-run", "--questions", "1", "--runs", "1"])
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "control-q01-r1" in out
+    assert "treatment-q01-r1" in out
+
+
+def test_dry_run_respects_arm_filter(capsys):
+    result = main(["--dry-run", "--questions", "1", "--runs", "1", "--arm", "treatment"])
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "treatment-q01-r1" in out
+    assert "control-q01-r1" not in out

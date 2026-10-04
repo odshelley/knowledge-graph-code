@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate .mcp.json for this project: graphify stdio + Neo4j read-only.
 
-.mcp.json carries the Neo4j password, so it is gitignored. Regenerate it rather
-than editing it by hand.
+This is the TREATMENT-ARM config for the verification harness (graphify +
+mcp-neo4j-cypher). Daily use is `kgc init`. Plan 2 deletes this file with
+graphify.
 """
 from __future__ import annotations
 
@@ -69,11 +70,20 @@ def _write_private(path: Path, text: str) -> None:
         f.write(text)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", default=None,
+                        help="where to write (default: ./.mcp.json). The verification "
+                             "harness's treatment arm reads verify/treatment-mcp.json.")
+    args = parser.parse_args(argv)
+    out_path = Path(args.out) if args.out else OUT_PATH
+
     settings = load_settings(Path(".env"))
     config = build_config(settings, global_graph_path(), Path(sys.executable))
-    _write_private(OUT_PATH, json.dumps(config, indent=2))
-    print(f"wrote {OUT_PATH} (gitignored, mode 600)")
+    _write_private(out_path, json.dumps(config, indent=2))
+    print(f"wrote {out_path} (gitignored, mode 600)")
     print(f"servers: graphify (stdio), neo4j (read-only, mcp-neo4j-cypher@{NEO4J_MCP_VERSION})")
     return 0
 

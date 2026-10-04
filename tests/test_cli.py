@@ -113,3 +113,88 @@ def test_push_reports_failure_cleanly(monkeypatch, capsys):
     assert result == 1
     captured = capsys.readouterr()
     assert "push failed: boom" in captured.err
+
+
+import json
+import stat
+
+
+def _env(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("NEO4J_URI=neo4j+s://h.example\nNEO4J_USERNAME=u\n"
+                   "NEO4J_PASSWORD=s3cret\nNEO4J_DATABASE=d\n", encoding="utf-8")
+    return env
+
+
+def _repos(tmp_path, monkeypatch):
+    repos = tmp_path / "repos.yaml"
+    repos.write_text("repos:\n  - path: /tmp/a\n    tag: alpha\n  - path: /tmp/b\n    tag: beta\n",
+                     encoding="utf-8")
+    monkeypatch.setattr("kgc.cli.REPOS_PATH", repos)
+    return repos
+
+
+def test_init_writes_a_secret_free_mcp_json_and_prints_the_claude_md_block(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    _repos(tmp_path, monkeypatch)
+    out = tmp_path / ".mcp.json"
+
+    assert main(["init", "--env", str(env), "--out", str(out)]) == 0
+
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert list(data["mcpServers"]) == ["kgc"]
+    assert data["mcpServers"]["kgc"]["args"][-2:] == ["--env", str(env.resolve())]
+    raw = out.read_text(encoding="utf-8")
+    for forbidden in ("s3cret", "NEO4J", "h.example", '"u"'):
+        assert forbidden not in raw
+    printed = capsys.readouterr().out
+    assert "Add this to your CLAUDE.md" in printed
+    assert "# kgc code graph" in printed and "`alpha`, `beta`" in printed
+
+
+def test_init_can_append_the_block_to_a_claude_md_instead_of_printing(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path)
+    _repos(tmp_path, monkeypatch)
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# mine\n", encoding="utf-8")
+
+    assert main(["init", "--env", str(env), "--out", str(tmp_path / ".mcp.json"),
+                 "--claude-md", str(target)]) == 0
+
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith("# mine\n\n# kgc code graph")
+    printed = capsys.readouterr().out
+    assert "appended kgc block to" in printed
+    assert "Add this to your CLAUDE.md" not in printed
+
+
+def test_init_refuses_a_broken_env_without_writing_anything(tmp_path, monkeypatch, capsys):
+    env = tmp_path / ".env"
+    env.write_text("NEO4J_URI=neo4j+s://h\n", encoding="utf-8")   # three keys missing
+    _repos(tmp_path, monkeypatch)
+    out = tmp_path / ".mcp.json"
+
+    assert main(["init", "--env", str(env), "--out", str(out)]) == 1
+
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "missing required key" in err
+    assert "s3cret" not in err
+
+
+def test_serve_loads_settings_and_hands_off_to_the_server(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    recorded = {}
+
+    def fake_serve(settings, *, http_port=None):
+        recorded["uri"] = settings.neo4j_uri
+        recorded["http_port"] = http_port
+
+    monkeypatch.setattr("kgc.server.app.serve", fake_serve)
+
+    assert main(["serve", "--env", str(env)]) == 0
+    assert recorded == {"uri": "neo4j+s://h.example", "http_port": None}
+
+    assert main(["serve", "--env", str(env), "--http", "8765"]) == 0
+    assert recorded["http_port"] == 8765

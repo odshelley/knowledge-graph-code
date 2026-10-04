@@ -5,6 +5,7 @@ description = "Multi-repo code graph POC: graphify + Neo4j + MCP"
 requires-python = ">=3.11"
 dependencies = [
     "graphifyy[mcp]==0.9.74",
+    "mcp>=2.3,<3",
     "neo4j>=5.28",
     "pyyaml>=6.0",
 ]

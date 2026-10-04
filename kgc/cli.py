@@ -1,5 +1,5 @@
 # kgc/cli.py
-"""Command line entry point: doctor / build / push / status.
+"""Command line entry point: doctor / build / push / status / serve / init.
 
 These subcommands take no knowledge of what invoked them, so a manual run and a
 CI runner are interchangeable. That is what makes this POC transferable to the
@@ -8,6 +8,7 @@ bank, where CI on merge to master is the correct trigger.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -128,6 +129,41 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from kgc.server.app import serve
+
+    settings = load_settings(Path(args.env))
+    serve(settings, http_port=args.http)
+    return 0
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    from kgc.server.claude_md import render_claude_md
+    from kgc.server.setup import append_claude_md, build_mcp_config, write_private
+
+    env_path = Path(args.env)
+    try:
+        load_settings(env_path)          # validate now; never echo a value
+        repos = load_repos(REPOS_PATH)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"init refused: {exc}", file=sys.stderr)
+        return 1
+
+    out = Path(args.out)
+    write_private(out, json.dumps(build_mcp_config(env_path, Path(sys.executable)), indent=2) + "\n")
+    print(f"wrote {out} (mode 600; credentials stay in {env_path})")
+
+    block = render_claude_md([r.tag for r in repos])
+    if args.claude_md:
+        target = Path(args.claude_md)
+        changed = append_claude_md(target, block)
+        print(f"{'appended kgc block to' if changed else 'kgc block already present in'} {target}")
+    else:
+        print("\nAdd this to your CLAUDE.md:\n")
+        print(block, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kgc")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -146,6 +182,19 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="list repos in the global graph").set_defaults(
         func=_cmd_status)
+
+    p_serve = sub.add_parser("serve", help="run the kgc MCP server (stdio; --http PORT for HTTP)")
+    p_serve.add_argument("--env", default=str(ENV_PATH), help="path to .env (default: ./.env)")
+    p_serve.add_argument("--http", type=int, default=None, metavar="PORT",
+                         help="serve over streamable HTTP on 127.0.0.1:PORT instead of stdio (no auth)")
+    p_serve.set_defaults(func=_cmd_serve)
+
+    p_init = sub.add_parser("init", help="write .mcp.json for this checkout and print the CLAUDE.md block")
+    p_init.add_argument("--env", default=str(ENV_PATH), help="path to .env (default: ./.env)")
+    p_init.add_argument("--out", default=".mcp.json", help="where to write the MCP config (default: ./.mcp.json)")
+    p_init.add_argument("--claude-md", default=None, metavar="PATH",
+                        help="append the block to this CLAUDE.md instead of printing it")
+    p_init.set_defaults(func=_cmd_init)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

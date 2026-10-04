@@ -62,7 +62,7 @@ def test_main_writes_mcp_json_as_0600_even_over_a_wider_existing_file(tmp_path, 
     monkeypatch.setattr("setup_mcp.load_settings", lambda path: SETTINGS)
     monkeypatch.setattr("setup_mcp.global_graph_path", lambda: Path("/tmp/g.json"))
 
-    assert setup_mcp.main() == 0
+    assert setup_mcp.main([]) == 0
 
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
     data = json.loads(out.read_text(encoding="utf-8"))
@@ -75,6 +75,17 @@ def test_main_creates_a_fresh_mcp_json_as_0600(tmp_path, monkeypatch):
     monkeypatch.setattr("setup_mcp.load_settings", lambda path: SETTINGS)
     monkeypatch.setattr("setup_mcp.global_graph_path", lambda: Path("/tmp/g.json"))
 
-    assert setup_mcp.main() == 0
+    assert setup_mcp.main([]) == 0
 
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_main_out_flag_writes_the_treatment_config_elsewhere(tmp_path, monkeypatch):
+    out = tmp_path / "treatment-mcp.json"
+    monkeypatch.setattr("setup_mcp.load_settings", lambda path: SETTINGS)
+    monkeypatch.setattr("setup_mcp.global_graph_path", lambda: Path("/tmp/g.json"))
+
+    assert setup_mcp.main(["--out", str(out)]) == 0
+
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert set(json.loads(out.read_text(encoding="utf-8"))["mcpServers"]) == {"graphify", "neo4j"}

@@ -14,28 +14,32 @@ Design: `docs/specs/2026-10-03-multi-repo-code-graph-design.md`.
 
 ## Setup
 
-    uv venv && uv pip install -e ".[dev]"
-    cp .env.example .env          # fill in NEO4J_URI / USERNAME / PASSWORD / DATABASE
-    .venv/bin/python -m pytest    # all green
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+cp .env.example .env            # then fill in the four NEO4J_* values; .env is gitignored, mode 0600
+.venv/bin/kgc doctor            # connection check; prints no secrets
+.venv/bin/kgc init              # writes .mcp.json (no secrets inside) and prints the CLAUDE.md block
+```
 
-`.env` and the generated `.mcp.json` hold the Neo4j password; both are gitignored
-and written mode 0600. Rotate the Aura password when the POC ends — it was pasted
-into a Claude Code session once.
+`kgc init --claude-md CLAUDE.md` appends the block instead of printing it. This
+project's own `CLAUDE.md` is exactly that block, so a fresh checkout needs only
+the `.mcp.json`.
 
 ## Run order
 
-Run every `kgc` command **from this directory**: `.env` and `repos.yaml` are
-resolved relative to the current working directory.
+```bash
+.venv/bin/kgc build             # extract every repo in repos.yaml (zero tokens), ~40 s for five repos
+.venv/bin/kgc push              # reap + upsert each repo into Neo4j; ensures indexes; writes a Repo node last
+.venv/bin/kgc serve             # the MCP server Claude Code spawns via .mcp.json (stdio)
+```
 
-1. `.venv/bin/kgc doctor` — proves the Neo4j connection and resolves the database name.
-2. `.venv/bin/kgc build` — zero-token AST extraction of each repo into
-   `~/.graphify/repos/<tag>/graphify-out/graph.json`, merged into
-   `~/.graphify/global-graph.json`, then direction normalisation and shared-stub
-   re-tagging. Nothing is written into the target repos.
-3. `.venv/bin/kgc push` — reap each repo's slice from Neo4j and re-push it.
-4. `.venv/bin/python setup_mcp.py` — writes `.mcp.json` (graphify stdio and
-   `mcp-neo4j-cypher@0.6.0`, read-only).
-5. Restart Claude Code in this directory and run `/mcp` to confirm both servers connected.
+Run from the project root: `.env` and `repos.yaml` are resolved relative to the
+current directory. `kgc serve --http PORT` serves over HTTP on localhost with no
+authentication, for experiments only.
+
+The nine tools: `search`, `describe`, `callers`, `callees`, `impact`,
+`externals`, `cross_repo`, `stats`, `cypher` (read-only). `stats` names the
+file extensions the extractor did not parse — the graph's blind spots.
 
 ## Verification
 

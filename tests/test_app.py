@@ -1,3 +1,4 @@
+import threading
 import time
 
 import anyio
@@ -99,3 +100,5 @@ def test_startup_repo_tags_gives_up_after_the_timeout():
     started = time.monotonic()
     assert startup_repo_tags(_Slow(), timeout=0.05) == []
     assert time.monotonic() - started < 0.4
+    leftover = [t for t in threading.enumerate() if t.name.startswith("kgc-startup")]
+    assert leftover and all(t.daemon for t in leftover)

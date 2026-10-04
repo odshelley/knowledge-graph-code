@@ -7,7 +7,7 @@ behind a generic ToolError.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from mcp.server.mcpserver import MCPServer
 
@@ -23,14 +23,19 @@ STARTUP_TIMEOUT_SECONDS = 3.0
 def startup_repo_tags(backend, timeout: float = STARTUP_TIMEOUT_SECONDS) -> list[str]:
     """Best effort: the tags currently pushed, for the search description.
     Any failure or a slow (paused) instance yields [] and the server starts anyway."""
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kgc-startup")
-    future = pool.submit(lambda: [r["tag"] for r in backend.read(REPO_TAGS)])
-    try:
-        return future.result(timeout=timeout)
-    except Exception:  # noqa: BLE001 - timeout, KgcError, anything: the fallback is generic text
-        return []
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    result = []
+
+    def fetch_tags():
+        try:
+            result.clear()
+            result.extend([r["tag"] for r in backend.read(REPO_TAGS)])
+        except Exception:  # noqa: BLE001 - timeout, KgcError, anything: the fallback is generic text
+            pass
+
+    thread = threading.Thread(target=fetch_tags, name="kgc-startup", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    return result
 
 
 def _run(fn, **kwargs) -> str:

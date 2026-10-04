@@ -1,6 +1,6 @@
 import pytest
 from kgc.config import Settings
-from kgc.neo4j_io import doctor, DoctorReport, resolve_database
+from kgc.graph.neo4j_io import doctor, DoctorReport, resolve_database
 
 
 class _FakeResult:
@@ -99,7 +99,7 @@ def test_doctor_reports_unreachable_without_leaking_password_on_connect_failure(
     def _broken_connect(settings):
         raise ValueError("bad uri neo4j+s://x with password secret")
 
-    monkeypatch.setattr("kgc.neo4j_io.connect", _broken_connect)
+    monkeypatch.setattr("kgc.graph.neo4j_io.connect", _broken_connect)
     report = doctor(SETTINGS)
     assert report.reachable is False
     assert "secret" not in report.message

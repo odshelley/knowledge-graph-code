@@ -101,12 +101,12 @@ def test_push_reports_failure_cleanly(monkeypatch, capsys):
     graph.add_node("x::n", repo=tag)
     monkeypatch.setattr("kgc.cli.load_global_graph", lambda: graph)
 
-    # _cmd_push imports push_global_graph from kgc.neo4j_io locally at call
-    # time, so the patch target is the function's home module, not kgc.cli.
+    # _cmd_push imports push_global_graph from kgc.graph.neo4j_io locally at
+    # call time, so the patch target is the function's home module, not kgc.cli.
     def fake_push_global_graph(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("kgc.neo4j_io.push_global_graph", fake_push_global_graph)
+    monkeypatch.setattr("kgc.graph.neo4j_io.push_global_graph", fake_push_global_graph)
 
     result = main(["push"])
 

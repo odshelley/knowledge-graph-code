@@ -1,7 +1,7 @@
 import networkx as nx
 import pytest
 from kgc.config import Settings
-from kgc.neo4j_io import (
+from kgc.graph.neo4j_io import (
     REAP_REPO,
     REAP_ORPHAN_EXTERNALS,
     preflight_capacity,
@@ -69,7 +69,7 @@ def test_preflight_capacity_fails_over_relationship_limit():
 def test_rel_type_sanitises_an_injection_attempt():
     # Relationship types cannot be parameterised in Cypher, so this string is
     # interpolated. The sanitiser is the injection guard.
-    from kgc.neo4j_io import _rel_type
+    from kgc.graph.neo4j_io import _rel_type
     out = _rel_type("imports]->(x) DETACH DELETE x //")
     assert all(ch.isalnum() or ch == "_" for ch in out)
     assert out[0].isalpha() or out[0] == "_"

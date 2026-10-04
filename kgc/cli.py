@@ -27,7 +27,7 @@ REPOS_PATH = Path("repos.yaml")
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
-    from kgc.neo4j_io import doctor
+    from kgc.graph.neo4j_io import doctor
 
     settings = load_settings(ENV_PATH)
     print(f"neo4j target: {settings.redacted()}")
@@ -102,7 +102,7 @@ def _cmd_push(args: argparse.Namespace) -> int:
         print(f"no global graph to push: {exc}", file=sys.stderr)
         return 1
 
-    from kgc.neo4j_io import push_global_graph
+    from kgc.graph.neo4j_io import push_global_graph
 
     settings = load_settings(ENV_PATH)
     repos = load_repos(REPOS_PATH)

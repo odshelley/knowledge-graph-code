@@ -136,6 +136,27 @@ reading the code. In order:
      scoped to exactly what that question needs (e.g.
      `--allowed-tools "Read Grep Glob"` for a read-only question) rather than
      widening permissions globally.
+   - **Per-run isolation.** A single run that hangs, exits nonzero, or
+     produces unparseable output does not abort the batch: the loop moves
+     on to the next run and writes `verify/runs/<label>.error.json`
+     (`run_label`, `exception_type`, `exception_message`, and a
+     `stderr_tail` when one was captured) instead of the usual
+     `<label>.json`. `run_arm.py` exits 1 if anything failed and prints the
+     list of failed labels, even though every run that *did* succeed is
+     already on disk. A run that hangs for longer than `--timeout` seconds
+     (default 900) is killed and counted as a failure the same way -
+     e.g. because it is stuck on a permission prompt no human is there to
+     answer; lower it with `--timeout 120` while iterating, or raise it for
+     a genuinely slow question.
+   - **Resuming.** Re-running the same command after a partial or failed
+     batch does not repeat work: any run whose `verify/runs/<label>.json`
+     already exists is printed as `skip (exists)` and left alone - this
+     applies to `--dry-run` too, so a resumed dry run shows accurately what
+     would still happen. Pass `--force` to re-run everything regardless
+     (e.g. after fixing something that could have produced a bad answer).
+     An `.error.json` from a previous failed attempt does **not** block a
+     retry - only a completed `.json` does, so simply re-running without
+     `--force` naturally retries anything that failed last time.
 3. Judge correctness: for every file under `verify/runs/*.json`, read the
    `answer` field against the real code (the file paths named in
    `questions.md` are a starting point, not the full answer) and fill in the

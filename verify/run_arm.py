@@ -17,14 +17,26 @@ Arms
   `--mcp-config` is passed - the project's own config is used.
 - **control**: cwd is the question's primary repo (`repo_path_map()[q.repo]`),
   and an empty `--mcp-config` + `--strict-mcp-config` is passed so no MCP
-  server can leak in even if one happens to be configured globally. The
-  prompt is prefixed with the on-disk path of all five repos (see
-  `CONTROL_PREAMBLE`) so a cross-repo question is not unfairly impossible for
-  control purely because of which directory it started in - the comparison
-  this experiment cares about is "graph vs. files", not "told where things
-  are vs. not". Treatment still benefits from `CLAUDE.md` beyond that; that
+  server can leak in even if one happens to be configured globally. For a
+  `cross-repo` or `blind-spot` question only (`PREAMBLE_CLASSES`), the
+  prompt is prefixed with the on-disk path of all five repos so that class
+  of question is not unfairly impossible for control purely because of
+  which directory it started in - the comparison this experiment cares
+  about is "graph vs. files", not "told where things are vs. not". The
+  other two classes (`single-repo`, `hidden-dependency`) only ever concern
+  the one repo named in `[repo]`, so they get no preamble - adding one would
+  be a token tax on control with nothing to justify it. Treatment still
+  benefits from `CLAUDE.md` beyond that, regardless of class; that
   asymmetry is intentional (see questions.md and results.md) - the graph
   audit found agents rarely reach for graph tools unprompted.
+
+Every question's live prompt is the bare numbered line from questions.md -
+never the indented grader-note sub-bullets beneath it, which carry the
+grounding/verified-answer/grading-rule content a human needs to judge
+correctness. `_QUESTION_RE` only matches the numbered line, by construction
+(see `parse_questions`); keeping the rubric out of the prompt is enforced by
+`tests/test_verify_runner.py`'s rubric-language guard tests, not just by
+convention in the markdown.
 
 CLI flags verified against `claude --help` (Claude Code 2.1.258) while
 writing this file:
@@ -34,6 +46,15 @@ writing this file:
   there is no literal "default" choice; see `_permission_mode_args` below for
   how this script spells "use the implicit default" anyway).
   `--max-turns` does **not** exist in this CLI version and is never passed.
+
+Per-run isolation: a malformed stdout line, a hung process, or any other
+single-run failure must not abort the other ~47 runs in a batch. See
+`parse_stream_json` (skips/counts malformed lines), `_execute` (`timeout=`,
+default 900s via `--timeout`), and `main` (each run is wrapped in its own
+try/except; a failure writes `verify/runs/<label>.error.json` instead of
+aborting, and the exit code is 1 iff anything failed). Re-running after a
+partial batch skips any run whose `<label>.json` already exists; `--force`
+re-runs everything anyway.
 """
 from __future__ import annotations
 
@@ -113,8 +134,17 @@ def _control_preamble(repos: dict[str, Path]) -> str:
     return "\n".join(lines)
 
 
+# Only these two classes genuinely need to know the other four repos exist
+# (a cross-repo impact question, or a blind-spot question about something
+# that might live anywhere) - single-repo and hidden-dependency questions
+# only ever need the one repo named in [repo]. Applying the preamble to all
+# twelve would be a small, systematic token tax on control for the seven
+# questions that don't need it, tilting the ratio toward treatment for free.
+PREAMBLE_CLASSES = frozenset({"cross-repo", "blind-spot"})
+
+
 def build_prompt(arm: str, question: Question, repos: dict[str, Path]) -> str:
-    if arm == "control":
+    if arm == "control" and question.cls in PREAMBLE_CLASSES:
         return f"{_control_preamble(repos)}\n\n{question.text}"
     return question.text
 
@@ -179,15 +209,26 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
     (`mcp__graphify__*` / `mcp__neo4j__*`); the captured sample used no
     tools, so that half of the parser is exercised only by the synthetic
     tests in tests/test_verify_runner.py, not by the sample itself.
+
+    A single malformed/interleaved line (truncated output, a stray stderr
+    line that leaked onto stdout, ...) must not blow up the whole run: such
+    lines are skipped and counted in `malformed_lines`, not raised on. The
+    one thing that still raises is finding no `result` event at all - that
+    is a real failure (the run never completed), not noise to shrug off.
     """
     result_event: dict | None = None
     graphify_calls = 0
     neo4j_calls = 0
+    malformed_lines = 0
     for raw_line in lines:
         raw_line = raw_line.strip()
         if not raw_line:
             continue
-        event = json.loads(raw_line)
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            malformed_lines += 1
+            continue
         etype = event.get("type")
         if etype == "assistant":
             content = event.get("message", {}).get("content", []) or []
@@ -216,6 +257,7 @@ def parse_stream_json(lines: Iterable[str]) -> dict:
         "cache_read_tokens": usage.get("cache_read_input_tokens"),
         "graphify_calls": graphify_calls,
         "neo4j_calls": neo4j_calls,
+        "malformed_lines": malformed_lines,
         "raw_result_event": result_event,
     }
 
@@ -234,26 +276,51 @@ def _append_csv_row(path: Path, row: dict) -> None:
         csv.writer(f).writerow([row[col] for col in CSV_HEADER])
 
 
-def _execute(inv: Invocation) -> str:
-    proc = subprocess.run(
-        inv.argv, cwd=inv.cwd, capture_output=True, text=True, check=False,
-    )
+class RunFailed(RuntimeError):
+    """One `claude -p` invocation failed (nonzero exit with no stdout, or a
+    timeout). Carries a stderr tail (possibly empty) so `main`'s per-run
+    except-block can write it into the `.error.json` without re-parsing
+    anything."""
+
+    def __init__(self, message: str, *, stderr_tail: str = "") -> None:
+        super().__init__(message)
+        self.stderr_tail = stderr_tail
+
+
+_STDERR_TAIL_CHARS = 2000
+
+
+def _execute(inv: Invocation, *, timeout: float) -> str:
+    try:
+        proc = subprocess.run(
+            inv.argv, cwd=inv.cwd, capture_output=True, text=True, check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        tail = (exc.stderr or "")[-_STDERR_TAIL_CHARS:] if exc.stderr else ""
+        raise RunFailed(f"claude timed out after {timeout}s", stderr_tail=tail) from exc
     if proc.returncode != 0 and not proc.stdout.strip():
-        raise RuntimeError(
-            f"claude exited {proc.returncode} with no stdout; stderr:\n{proc.stderr}"
+        raise RunFailed(
+            f"claude exited {proc.returncode} with no stdout",
+            stderr_tail=(proc.stderr or "")[-_STDERR_TAIL_CHARS:],
         )
     return proc.stdout
+
+
+def _run_file_exists(label: str) -> bool:
+    return (RUNS_DIR / f"{label}.json").exists()
 
 
 def _run_one(
     arm: str, question: Question, run: int, *, model: str,
     permission_mode: str, allowed_tools: str | None, repos: dict[str, Path],
+    timeout: float,
 ) -> None:
     inv = build_invocation(
         arm, question, run=run, model=model, permission_mode=permission_mode,
         allowed_tools=allowed_tools, repos=repos,
     )
-    stdout = _execute(inv)
+    stdout = _execute(inv, timeout=timeout)
     parsed = parse_stream_json(stdout.splitlines())
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -328,6 +395,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dry-run", action="store_true", help="print every command; write nothing")
     p.add_argument(
+        "--timeout", type=float, default=900.0,
+        help="seconds before a single `claude -p` invocation is killed and that run "
+             "counted as failed (default: 900). A hung headless run - e.g. stuck on a "
+             "permission prompt with no human to answer it - must not hang the batch.",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="re-run even a question/arm/run whose verify/runs/<label>.json already "
+             "exists. Without it, re-running after a partial or failed batch just "
+             "continues - every completed run is skipped, not repeated.",
+    )
+    p.add_argument(
         "--schema-check", metavar="PATH", nargs="?", const=str(SCHEMA_SAMPLE_PATH),
         help="parse a saved stream-json sample (default: verify/schema-sample.jsonl) and print the result",
     )
@@ -343,26 +422,56 @@ def main(argv: list[str] | None = None) -> int:
     questions = _parse_question_filter(args.questions, parse_questions(QUESTIONS_PATH))
     arms = ARMS if args.arm == "both" else (args.arm,)
     repos = repo_path_map()
+    failed_labels: list[str] = []
 
     for question in questions:
         for arm in arms:
             for run in range(1, args.runs + 1):
                 label = run_label(arm, question, run)
-                inv = build_invocation(
-                    arm, question, run=run, model=args.model,
-                    permission_mode=args.permission_mode,
-                    allowed_tools=args.allowed_tools, repos=repos,
-                )
+
+                if not args.force and _run_file_exists(label):
+                    print(f"[{label}] skip (exists)")
+                    continue
+
                 if args.dry_run:
+                    inv = build_invocation(
+                        arm, question, run=run, model=args.model,
+                        permission_mode=args.permission_mode,
+                        allowed_tools=args.allowed_tools, repos=repos,
+                    )
                     print(f"[{label}] cwd={inv.cwd}")
                     print("  " + " ".join(_shell_quote(a) for a in inv.argv))
                     continue
+
                 print(f"[{label}] running...")
-                _run_one(
-                    arm, question, run, model=args.model,
-                    permission_mode=args.permission_mode,
-                    allowed_tools=args.allowed_tools, repos=repos,
-                )
+                try:
+                    _run_one(
+                        arm, question, run, model=args.model,
+                        permission_mode=args.permission_mode,
+                        allowed_tools=args.allowed_tools, repos=repos,
+                        timeout=args.timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad run must not abort the batch
+                    failed_labels.append(label)
+                    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+                    error_path = RUNS_DIR / f"{label}.error.json"
+                    error_path.write_text(
+                        json.dumps(
+                            {
+                                "run_label": label,
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                                "stderr_tail": getattr(exc, "stderr_tail", ""),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    print(f"  FAILED {label}: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    if failed_labels:
+        print(f"{len(failed_labels)} run(s) failed: {', '.join(failed_labels)}", file=sys.stderr)
+        return 1
     return 0
 
 

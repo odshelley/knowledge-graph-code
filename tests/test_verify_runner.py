@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 from verify.run_arm import (
     CSV_HEADER,
     EMPTY_MCP_PATH,
+    PREAMBLE_CLASSES,
     PROJECT_ROOT,
     QUESTIONS_PATH,
     build_invocation,
@@ -23,9 +25,19 @@ from verify.run_arm import (
     parse_questions,
     parse_stream_json,
     repo_path_map,
+    run_label,
 )
 
 SCHEMA_SAMPLE = Path(__file__).resolve().parent.parent / "verify" / "schema-sample.jsonl"
+
+# Rubric/grading language that must never appear in text sent to a model -
+# it belongs only in the indented grader-note sub-bullets questions.md keeps
+# underneath each item, which _QUESTION_RE (and therefore the live prompt)
+# never captures.
+RUBRIC_PHRASES = (
+    "correct answer", "counts as", "ground truth", "grader",
+    "expected answer", "must come back", "should say", "confidently",
+)
 
 
 # --- questions.md parsing -----------------------------------------------
@@ -57,6 +69,81 @@ def test_question_class_distribution_matches_the_spec():
         "hidden-dependency": 2,
         "blind-spot": 2,
     }
+
+
+# --- no rubric/ground-truth leakage into the live prompt -------------------
+
+def test_question_text_contains_no_rubric_language():
+    for q in parse_questions(QUESTIONS_PATH):
+        lowered = q.text.lower()
+        for phrase in RUBRIC_PHRASES:
+            assert phrase not in lowered, (
+                f"Q{q.number} leaks rubric phrase {phrase!r} into the prompt text: {q.text!r}"
+            )
+
+
+def test_q9_through_q12_prompts_contain_no_rubric_language():
+    # These are the probes the POC's premise rests on (hidden-dependency,
+    # blind-spot) - a prior draft leaked the grading rule and/or the answer
+    # itself into the numbered line, which build_prompt() forwards verbatim.
+    repos = repo_path_map()
+    by_number = {q.number: q for q in parse_questions(QUESTIONS_PATH)}
+    for n in (9, 10, 11, 12):
+        q = by_number[n]
+        for arm in ("control", "treatment"):
+            inv = build_invocation(
+                arm, q, run=1, model="sonnet", permission_mode="default",
+                allowed_tools=None, repos=repos,
+            )
+            prompt = inv.argv[inv.argv.index("-p") + 1].lower()
+            for phrase in RUBRIC_PHRASES:
+                assert phrase not in prompt, f"Q{n} {arm} prompt leaks {phrase!r}"
+
+
+# --- control-arm preamble is scoped to cross-repo/blind-spot only ----------
+
+def test_preamble_classes_are_exactly_cross_repo_and_blind_spot():
+    assert PREAMBLE_CLASSES == frozenset({"cross-repo", "blind-spot"})
+
+
+def test_cross_repo_and_blind_spot_control_prompts_carry_the_preamble():
+    repos = repo_path_map()
+    for q in parse_questions(QUESTIONS_PATH):
+        if q.cls not in ("cross-repo", "blind-spot"):
+            continue
+        inv = build_invocation(
+            "control", q, run=1, model="sonnet", permission_mode="default",
+            allowed_tools=None, repos=repos,
+        )
+        prompt = inv.argv[inv.argv.index("-p") + 1]
+        assert "five repositories are available" in prompt
+        for path in repos.values():
+            assert str(path) in prompt
+
+
+def test_single_repo_and_hidden_dependency_control_prompts_carry_no_preamble():
+    repos = repo_path_map()
+    for q in parse_questions(QUESTIONS_PATH):
+        if q.cls not in ("single-repo", "hidden-dependency"):
+            continue
+        inv = build_invocation(
+            "control", q, run=1, model="sonnet", permission_mode="default",
+            allowed_tools=None, repos=repos,
+        )
+        prompt = inv.argv[inv.argv.index("-p") + 1]
+        assert prompt == q.text
+        assert "five repositories" not in prompt
+
+
+def test_treatment_prompt_never_carries_the_preamble_regardless_of_class():
+    repos = repo_path_map()
+    for q in parse_questions(QUESTIONS_PATH):
+        inv = build_invocation(
+            "treatment", q, run=1, model="sonnet", permission_mode="default",
+            allowed_tools=None, repos=repos,
+        )
+        prompt = inv.argv[inv.argv.index("-p") + 1]
+        assert prompt == q.text
 
 
 # --- repo_path_map --------------------------------------------------------
@@ -228,6 +315,29 @@ def test_parse_stream_json_raises_without_a_result_event():
         parse_stream_json([json.dumps({"type": "system", "subtype": "init"})])
 
 
+def test_parse_stream_json_skips_malformed_lines_and_counts_them():
+    lines = [
+        "not json at all {{{",
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        }),
+        "{also broken",
+        json.dumps({
+            "type": "result", "is_error": False, "num_turns": 1, "duration_ms": 1,
+            "total_cost_usd": 0.01, "result": "answer", "usage": {},
+        }),
+    ]
+    parsed = parse_stream_json(lines)
+    assert parsed["answer"] == "answer"
+    assert parsed["malformed_lines"] == 2
+
+
+def test_parse_stream_json_raises_without_result_even_with_malformed_lines():
+    with pytest.raises(ValueError):
+        parse_stream_json(["not json", "{also bad", "still not json"])
+
+
 @pytest.mark.skipif(not SCHEMA_SAMPLE.exists(), reason="no captured schema sample")
 def test_parser_handles_the_real_captured_schema_sample():
     lines = SCHEMA_SAMPLE.read_text(encoding="utf-8").splitlines()
@@ -285,3 +395,146 @@ def test_dry_run_respects_arm_filter(capsys):
     out = capsys.readouterr().out
     assert "treatment-q01-r1" in out
     assert "control-q01-r1" not in out
+
+
+# --- _execute: timeout plumbing (subprocess.run is monkeypatched, never real) --
+
+def test_execute_passes_timeout_to_subprocess_run(monkeypatch):
+    from verify.run_arm import Invocation, _execute
+
+    recorded_kwargs = {}
+
+    def fake_run(argv, **kwargs):
+        recorded_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"type": "result", "result": "ok", "usage": {}}), stderr="",
+        )
+
+    monkeypatch.setattr("verify.run_arm.subprocess.run", fake_run)
+    inv = Invocation(argv=["claude", "-p", "x"], cwd=Path("."))
+
+    out = _execute(inv, timeout=123)
+
+    assert recorded_kwargs["timeout"] == 123
+    assert "ok" in out
+
+
+def test_execute_raises_run_failed_on_timeout(monkeypatch):
+    from verify.run_arm import Invocation, RunFailed, _execute
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"), output=b"", stderr=b"stuck")
+
+    monkeypatch.setattr("verify.run_arm.subprocess.run", fake_run)
+    inv = Invocation(argv=["claude", "-p", "x"], cwd=Path("."))
+
+    with pytest.raises(RunFailed) as exc_info:
+        _execute(inv, timeout=5)
+    assert "timed out" in str(exc_info.value)
+
+
+def test_execute_raises_run_failed_on_nonzero_exit_with_no_stdout(monkeypatch):
+    from verify.run_arm import Invocation, RunFailed, _execute
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="permission denied")
+
+    monkeypatch.setattr("verify.run_arm.subprocess.run", fake_run)
+    inv = Invocation(argv=["claude", "-p", "x"], cwd=Path("."))
+
+    with pytest.raises(RunFailed) as exc_info:
+        _execute(inv, timeout=5)
+    assert "permission denied" in exc_info.value.stderr_tail
+
+
+# --- main(): one run failing does not abort the batch -----------------------
+
+def test_main_continues_after_one_run_fails_and_exits_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+
+    calls: list[str] = []
+
+    def fake_run_one(arm, question, run, *, model, permission_mode, allowed_tools, repos, timeout):
+        label = run_label(arm, question, run)
+        calls.append(label)
+        if label == "treatment-q01-r1":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("verify.run_arm._run_one", fake_run_one)
+
+    result = main(["--questions", "1", "--runs", "1"])
+
+    assert result == 1
+    assert set(calls) == {"control-q01-r1", "treatment-q01-r1"}
+    error_file = tmp_path / "runs" / "treatment-q01-r1.error.json"
+    assert error_file.exists()
+    data = json.loads(error_file.read_text())
+    assert data["run_label"] == "treatment-q01-r1"
+    assert data["exception_type"] == "RuntimeError"
+    assert "boom" in data["exception_message"]
+
+
+def test_main_returns_zero_when_every_run_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+    monkeypatch.setattr("verify.run_arm._run_one", lambda *a, **k: None)
+
+    result = main(["--questions", "1", "--runs", "1"])
+
+    assert result == 0
+    assert not (tmp_path / "runs").exists() or not list((tmp_path / "runs").glob("*.error.json"))
+
+
+# --- resume: skip a run whose output file already exists, unless --force ---
+
+def test_resume_skips_a_run_whose_output_file_already_exists(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "control-q01-r1.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "verify.run_arm._run_one",
+        lambda arm, question, run, **k: calls.append(run_label(arm, question, run)),
+    )
+
+    result = main(["--questions", "1", "--runs", "1", "--arm", "control"])
+
+    assert result == 0
+    assert calls == []
+
+
+def test_force_reruns_a_run_whose_output_file_already_exists(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "control-q01-r1.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "verify.run_arm._run_one",
+        lambda arm, question, run, **k: calls.append(run_label(arm, question, run)),
+    )
+
+    result = main(["--questions", "1", "--runs", "1", "--arm", "control", "--force"])
+
+    assert result == 0
+    assert calls == ["control-q01-r1"]
+
+
+def test_dry_run_also_reports_skip_for_an_existing_run(tmp_path, monkeypatch, capsys):
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "control-q01-r1.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("verify.run_arm.RUNS_DIR", runs_dir)
+    monkeypatch.setattr("verify.run_arm.RESULTS_CSV", tmp_path / "results.csv")
+
+    result = main(["--dry-run", "--questions", "1", "--runs", "1", "--arm", "control"])
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "skip" in out.lower()

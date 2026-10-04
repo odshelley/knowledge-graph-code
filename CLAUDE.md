@@ -9,11 +9,11 @@ where something lives: use the **graphify** server's `query_graph`, `get_node`,
 `get_neighbors`, or `shortest_path` tools FIRST — before reading files or grepping.
 
 For cross-repo aggregates, "which repos import X", or impact / reverse-dependency
-questions: use the **neo4j** server's `read-cypher` tool. Edges point from
-`_src` to `_tgt`, one relationship type per relation (e.g. `calls`, `imports`).
-Every node has label `CodeNode` with properties `id`, `label`, `repo` (absent
-on shared external stubs, which carry `external: true` instead), `source_file`,
-`community`.
+questions: use the **neo4j** server's `read_neo4j_cypher` tool (`get_neo4j_schema`
+first to inspect labels/relationship types). Edges point from `_src` to `_tgt`,
+one relationship type per relation (e.g. `calls`, `imports`). Every node has
+label `CodeNode` with properties `id`, `label`, `repo` (absent on shared
+external stubs, which carry `external: true` instead), `source_file`, `community`.
 
 Example:
 

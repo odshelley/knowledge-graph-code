@@ -98,8 +98,14 @@ def cut_to_budget(lines: list[str], max_tokens: int = DEFAULT_MAX_TOKENS,
     if len(output) <= budget:
         return output
     cut = output[:budget].rfind("\n")
-    kept = output[:cut] if cut > 0 else output[:budget]
-    shown = kept.count("\n") + 1 if kept else 0
+    if cut <= 0:
+        # No newline found in budget window; can't fit even one full line
+        return (
+            f"[truncated: showing 0 of {len(lines)} lines; first line alone exceeds the budget, raise max_tokens; {hint}]\n"
+            + f"… truncated; {hint}"
+        )
+    kept = output[:cut]
+    shown = kept.count("\n") + 1
     return (
         f"[truncated: showing {shown} of {len(lines)} lines; {hint}]\n"
         + kept

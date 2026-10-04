@@ -88,4 +88,19 @@ def test_cut_to_budget_cuts_on_a_line_boundary_and_says_so_top_and_bottom():
 def test_cut_to_budget_default_budget_and_custom_hint():
     assert DEFAULT_MAX_TOKENS == 1500 and CHARS_PER_TOKEN == 4
     out = cut_to_budget(["y" * 100] * 100, max_tokens=10, hint="add LIMIT")
-    assert out.endswith("… truncated; add LIMIT")
+    assert out == (
+        "[truncated: showing 0 of 100 lines; first line alone exceeds the budget, raise max_tokens; add LIMIT]\n"
+        "… truncated; add LIMIT"
+    )
+    assert "y" not in out
+
+
+def test_cut_to_budget_very_long_first_line():
+    """First line of 1000 chars followed by short lines, budget fits none."""
+    lines = ["z" * 1000] + ["short"] * 10
+    out = cut_to_budget(lines, max_tokens=5, hint="increase budget")
+    assert out == (
+        "[truncated: showing 0 of 11 lines; first line alone exceeds the budget, raise max_tokens; increase budget]\n"
+        "… truncated; increase budget"
+    )
+    assert "z" not in out

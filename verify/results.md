@@ -61,6 +61,13 @@ Both numbers are in every CSV row; report both, compare on `context_tokens`.
 
 ## Results
 
+**Third arm, `kgc`** (added 2026-10-04): the bespoke server from
+`docs/specs/2026-10-04-kgc-bespoke-mcp-design.md`, same twelve questions, same
+metrics, tool calls tallied as `kgc_calls`. Acceptance: `kgc` matches or beats
+`treatment` on correct answers while using no more `context_tokens`, and the
+fraction of runs with at least one graph-tool call is reported alongside. The
+`treatment` baseline must exist before `kgc` is judged.
+
 Populate from `verify/results.csv` (one row per run) after running the
 experiment. "tokens" below means `context_tokens` (see above); "cost" is
 `total_cost_usd`. "correct (all runs)" is No if even one run for that arm
@@ -145,6 +152,13 @@ question 1 in the spec).
 This harness was built, not run - see the task division of labour: running
 the experiment spends real tokens and judging correctness needs a human
 reading the code. In order:
+
+```bash
+.venv/bin/kgc push                                       # once after Plan 1 lands: creates kgc_text + Repo nodes
+.venv/bin/python setup_mcp.py --out verify/treatment-mcp.json
+.venv/bin/kgc init --out verify/kgc-mcp.json
+.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc   # pre-flight: isolation_ok, kgc_calls > 0
+```
 
 1. **Clear stale per-repo graphs.** Earlier `kgc build`s wrote
    `<repo>/graphify-out/` into each of the five target repos; the current

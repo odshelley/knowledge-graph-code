@@ -43,6 +43,16 @@ file extensions the extractor did not parse — the graph's blind spots.
 
 ## Verification
 
+The harness has three arms: control (no MCP), treatment (graphify +
+mcp-neo4j-cypher) and kgc (this server).
+
+```bash
+.venv/bin/kgc push                                       # once after Plan 1 lands: creates kgc_text + Repo nodes
+.venv/bin/python setup_mcp.py --out verify/treatment-mcp.json
+.venv/bin/kgc init --out verify/kgc-mcp.json
+.venv/bin/python verify/run_arm.py --questions 1 --runs 1 --arm kgc   # pre-flight: isolation_ok, kgc_calls > 0
+```
+
 1. Earlier builds wrote `<repo>/graphify-out/` into the target repos; delete any
    that remain (they are untracked). The user's global graphify skill treats a
    question as a graphify query whenever that directory exists, which would

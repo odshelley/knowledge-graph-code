@@ -15,14 +15,18 @@ from pathlib import Path
 import pytest
 
 from verify.run_arm import (
+    ARM_MCP_CONFIG,
     ARMS,
     CSV_HEADER,
     EMPTY_MCP_PATH,
-    MCP_CONFIG_PATH,
+    EXPECTED_SERVERS,
+    MCP_ARMS,
     PREAMBLE_CLASSES,
     PROJECT_ROOT,
     QUESTIONS_PATH,
+    TREATMENT_CLAUDE_MD,
     build_invocation,
+    isolation_ok,
     main,
     parse_questions,
     parse_stream_json,
@@ -169,22 +173,6 @@ def _first_question():
     return parse_questions(QUESTIONS_PATH)[0]
 
 
-def test_treatment_invocation_uses_project_cwd_and_only_the_projects_mcp_config():
-    # Without --mcp-config/--strict-mcp-config the treatment arm also loads
-    # every MCP server in the user's global config (a tool-schema token tax,
-    # and untallied servers that could answer the question).
-    q = _first_question()
-    inv = build_invocation(
-        "treatment", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None,
-    )
-    assert inv.cwd == PROJECT_ROOT
-    assert MCP_CONFIG_PATH == PROJECT_ROOT / ".mcp.json"
-    idx = inv.argv.index("--mcp-config")
-    assert inv.argv[idx + 1] == str(MCP_CONFIG_PATH)
-    assert "--strict-mcp-config" in inv.argv
-    assert q.text in " ".join(inv.argv)
-
-
 def test_both_arms_disable_user_skills():
     # The user's global graphify skill says "treat any question as a graphify
     # query first when graphify-out/ exists" - either arm picking it up would
@@ -326,6 +314,12 @@ def test_parse_stream_json_tallies_mcp_tool_calls_by_server():
             ]},
         }),
         json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "mcp__kgc__callers", "input": {}},
+            ]},
+        }),
+        json.dumps({
             "type": "result", "is_error": False, "num_turns": 3, "duration_ms": 1,
             "total_cost_usd": 0.01, "result": "answer", "usage": {},
         }),
@@ -333,6 +327,7 @@ def test_parse_stream_json_tallies_mcp_tool_calls_by_server():
     parsed = parse_stream_json(lines)
     assert parsed["graphify_calls"] == 2
     assert parsed["neo4j_calls"] == 1
+    assert parsed["kgc_calls"] == 1
 
 
 def test_parse_stream_json_raises_without_a_result_event():
@@ -397,7 +392,7 @@ def test_csv_header_matches_the_documented_columns():
         "question", "arm", "run", "model", "input_tokens", "output_tokens",
         "cache_creation_tokens", "cache_read_tokens", "context_tokens",
         "total_cost_usd", "duration_ms", "num_turns", "permission_denials",
-        "contamination", "malformed_lines", "graphify_calls", "neo4j_calls",
+        "contamination", "malformed_lines", "graphify_calls", "neo4j_calls", "kgc_calls",
         "answer_file",
     ]
 
@@ -453,14 +448,6 @@ def test_dry_run_creates_no_files_under_verify_runs(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "claude" in out
     assert "-p" in out
-
-
-def test_dry_run_prints_both_arms_by_default(capsys):
-    result = main(["--dry-run", "--questions", "1", "--runs", "1"])
-    assert result == 0
-    out = capsys.readouterr().out
-    assert "control-q01-r1" in out
-    assert "treatment-q01-r1" in out
 
 
 def test_dry_run_respects_arm_filter(capsys):
@@ -543,7 +530,9 @@ def test_main_continues_after_one_run_fails_and_exits_nonzero(tmp_path, monkeypa
 
     monkeypatch.setattr("verify.run_arm._run_one", fake_run_one)
 
-    result = main(["--questions", "1", "--runs", "1"])
+    # --arm both: this test is about one run failing not aborting the batch,
+    # not about how many arms exist - pin it to the pre-kgc two-arm scope.
+    result = main(["--questions", "1", "--runs", "1", "--arm", "both"])
 
     assert result == 1
     assert set(calls) == {"control-q01-r1", "treatment-q01-r1"}
@@ -575,7 +564,10 @@ def test_main_error_handler_survives_a_non_str_stderr_tail(tmp_path, monkeypatch
 
     monkeypatch.setattr("verify.run_arm._run_one", fake_run_one)
 
-    result = main(["--questions", "1", "--runs", "1"])
+    # --arm both: this test is about the error handler surviving a non-str
+    # stderr_tail, not about how many arms exist - pin it to the pre-kgc
+    # two-arm scope.
+    result = main(["--questions", "1", "--runs", "1", "--arm", "both"])
 
     assert result == 1
     assert set(calls) == {"control-q01-r1", "treatment-q01-r1"}
@@ -799,3 +791,128 @@ def test_runs_below_one_is_rejected_by_the_parser(capsys):
         main(["--dry-run", "--questions", "1", "--runs", "0"])
     assert exc_info.value.code == 2
     assert "--runs" in capsys.readouterr().err
+
+
+# --- the kgc arm --------------------------------------------------------------
+
+from kgc.server.claude_md import MARKER, render_claude_md
+
+
+def test_arms_are_control_treatment_and_kgc():
+    assert ARMS == ("control", "treatment", "kgc")
+    assert MCP_ARMS == ("treatment", "kgc")
+    assert set(ARM_MCP_CONFIG) == set(MCP_ARMS)
+    assert ARM_MCP_CONFIG["treatment"].name == "treatment-mcp.json"
+    assert ARM_MCP_CONFIG["kgc"].name == "kgc-mcp.json"
+    assert EXPECTED_SERVERS == {"control": frozenset(), "treatment": frozenset({"graphify", "neo4j"}),
+                                "kgc": frozenset({"kgc"})}
+
+
+def test_mcp_arms_use_their_own_mcp_config_and_carry_their_own_claude_md():
+    q = _first_question()
+    for arm in MCP_ARMS:
+        inv = build_invocation(arm, q, run=1, model="sonnet", permission_mode="default", allowed_tools=None)
+        assert inv.cwd is None                                   # materialised per run
+        idx = inv.argv.index("--mcp-config")
+        assert inv.argv[idx + 1] == str(ARM_MCP_CONFIG[arm])
+        assert "--strict-mcp-config" in inv.argv
+        assert q.text in " ".join(inv.argv)
+    treatment = build_invocation("treatment", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None)
+    kgc = build_invocation("kgc", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None)
+    assert treatment.claude_md == TREATMENT_CLAUDE_MD.read_text(encoding="utf-8")
+    assert "read_neo4j_cypher" in treatment.claude_md and MARKER not in treatment.claude_md
+    assert kgc.claude_md == render_claude_md(sorted(repo_path_map()))
+
+
+def test_control_arm_still_runs_in_the_question_repo_with_no_claude_md():
+    q = _first_question()
+    inv = build_invocation("control", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None)
+    assert inv.cwd == repo_path_map()[q.repo]
+    assert inv.claude_md is None
+
+
+def test_mcp_arm_runs_in_a_temp_cwd_holding_only_its_claude_md(monkeypatch):
+    from verify.run_arm import _execute
+
+    recorded = {}
+
+    def fake_run(argv, **kwargs):
+        cwd = Path(kwargs["cwd"])
+        recorded["cwd"] = cwd
+        recorded["files"] = sorted(p.name for p in cwd.iterdir())
+        recorded["claude_md"] = (cwd / "CLAUDE.md").read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"type": "result", "result": "ok", "usage": {}}), stderr="",
+        )
+
+    monkeypatch.setattr("verify.run_arm.subprocess.run", fake_run)
+    q = _first_question()
+    inv = build_invocation("kgc", q, run=1, model="sonnet", permission_mode="default", allowed_tools=None)
+
+    _execute(inv, timeout=5)
+
+    assert recorded["cwd"] != PROJECT_ROOT and PROJECT_ROOT not in recorded["cwd"].parents
+    assert recorded["files"] == ["CLAUDE.md"]
+    assert recorded["claude_md"] == inv.claude_md
+    assert not recorded["cwd"].exists(), "temp cwd is removed after the run"
+
+
+def test_isolation_ok_compares_the_init_servers_to_the_arms_expectation():
+    assert isolation_ok("kgc", {"mcp_servers": [{"name": "kgc", "status": "connected"}]}) is True
+    assert isolation_ok("kgc", {"mcp_servers": [{"name": "kgc"}, {"name": "neo4j"}]}) is False
+    assert isolation_ok("treatment", {"mcp_servers": [{"name": "graphify"}, {"name": "neo4j"}]}) is True
+    assert isolation_ok("control", {"mcp_servers": []}) is True
+    assert isolation_ok("control", {}) is None
+
+
+def test_dry_run_prints_all_three_arms_by_default(capsys):
+    assert main(["--dry-run", "--questions", "1", "--runs", "1"]) == 0
+    out = capsys.readouterr().out
+    for arm in ARMS:
+        assert f"{arm}-q01-r1" in out
+
+
+def test_arm_both_means_control_and_treatment_only(capsys):
+    assert main(["--dry-run", "--questions", "1", "--runs", "1", "--arm", "both"]) == 0
+    out = capsys.readouterr().out
+    assert "control-q01-r1" in out and "treatment-q01-r1" in out
+    assert "kgc-q01-r1" not in out
+
+
+def test_run_one_records_kgc_calls_and_isolation(tmp_path, monkeypatch):
+    # Copy the monkeypatch lines from test_run_one_persists_malformed_lines_in_json_and_csv
+    # VERBATIM (they redirect every path _run_one writes to, including whatever
+    # answer_file is made relative to); the two lines below are the minimum and
+    # may need that test's extra ones. Then fake _execute with the stream.
+    import verify.run_arm as ra
+    monkeypatch.setattr(ra, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(ra, "RESULTS_CSV", tmp_path / "results.csv")
+    monkeypatch.setattr(ra, "PROJECT_ROOT", tmp_path)
+    stream = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "cwd": "/tmp/x",
+                    "mcp_servers": [{"name": "kgc", "status": "connected"}]}),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "mcp__kgc__search", "input": {"query": "x"}}]}}),
+        json.dumps({"type": "result", "is_error": False, "num_turns": 2, "duration_ms": 5,
+                    "total_cost_usd": 0.0, "result": "answer", "usage": {"input_tokens": 1}}),
+    ])
+    monkeypatch.setattr(ra, "_execute", lambda inv, *, timeout: stream)
+    q = _first_question()
+
+    ra._run_one("kgc", q, 1, model="sonnet", permission_mode="default", allowed_tools=None,
+                repos=repo_path_map(), timeout=1.0)
+
+    data = json.loads((tmp_path / "runs" / "kgc-q01-r1.json").read_text(encoding="utf-8"))
+    assert data["isolation_ok"] is True
+    assert data["kgc_calls"] == 1
+    header, row = (tmp_path / "results.csv").read_text(encoding="utf-8").splitlines()[:2]
+    assert header.split(",")[-2] == "kgc_calls"
+    assert row.split(",")[header.split(",").index("kgc_calls")] == "1"
+
+
+def test_results_csv_with_an_older_header_is_refused_not_corrupted(tmp_path):
+    from verify.run_arm import _ensure_csv_header
+    path = tmp_path / "results.csv"
+    path.write_text("question,arm,run,old\n1,control,1,x\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="older header"):
+        _ensure_csv_header(path)

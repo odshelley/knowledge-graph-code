@@ -176,7 +176,9 @@ they describe, deduplicated. `repo` filter is a Cypher `WHERE`.
 Lifted from graphify's `_cut_lines_to_budget` and the line shapes of
 `_subgraph_to_text`. Tokens are estimated at 4 characters per token. When the
 budget is hit, output is truncated at a line boundary and ends with
-`… truncated; narrow by repo or reduce depth`.
+`… truncated; narrow by repo or reduce depth`. Deviation: the `cypher` tool
+passes its own hint, `… truncated; add LIMIT or RETURN fewer columns`, since
+"narrow by repo" means nothing for a raw Cypher result.
 
 ### Read-only enforcement
 
@@ -189,8 +191,9 @@ literals, they match
 not refused, and backslash-escaped quotes inside literals are handled. The one
 deliberate false positive is a read-only `CALL { }` subquery, refused because
 a subquery can contain a write; the agent's recourse is the specific tools.
-Transaction timeout 10 s on every call. `depth` is capped at 4 on
-`callers`, `callees` and `impact`.
+Deviation: the guard regex also refuses `FOREACH`, which can itself contain
+a write and was missing from the list above. Transaction timeout 10 s on
+every call. `depth` is capped at 4 on `callers`, `callees` and `impact`.
 
 ### Runtime
 
